@@ -1,0 +1,137 @@
+#!/usr/bin/perl
+
+=encoding UTF-8
+
+=head1 NAME
+
+dh_installdebputy - install debputy plugins for debhelper packages
+
+=cut
+
+use strict;
+use warnings;
+use Debian::Debhelper::Dh_Lib;
+
+our $VERSION = DH_BUILTIN_VERSION;
+
+=head1 SYNOPSIS
+
+B<dh_installdebputy> [S<I<debhelper options>>] [S<B<--> I<params>>]
+
+=head1 DESCRIPTION
+
+B<dh_installdebputy> is a tool for installing B<debputy> plugins from a package built
+using B<debhelper>
+
+=head1 OPTIONS
+
+Standard debhelper options (such as B<-p>). Please see L<debhelper(7)>.
+
+=head1 DIRECTORIES
+
+=over 4
+
+=item F<debian/debputy-plugins/>, F<< debian/I<PACKAGE>.debputy-plugins/ >>
+
+These directories will contain the plugin(s) and related support files.
+Unlike most debhelper like tools, these must be directories (not files).
+
+Inside each directory, place the JSON descriptor file and (if relevant)
+related Python code and tests.  For a plugin named I<my-plugin> installed
+into I<package>, you might see:
+
+
+    debian/package.debputy-plugins/my-plugin.json
+	debian/package.debputy-plugins/my_plugin.py
+	debian/package.debputy-plugins/my_plugin_check.py
+
+If any tests are provided, they will be run when the plugin is installed
+provided that B<py.test> is available. Consider adding
+B<< python3-pytest <!nocheck> >> to B<Build-Depends> for this purpose.
+Additionally, the tests can be picked up by the B<autopkgtests> framework
+if you add B<autopkgtest-pkg-debputy> to the B<Testsuite> field in
+F<debian/control>.
+
+It is possible to have multiple test files:
+
+
+    debian/package.debputy-plugins/my-plugin.json
+	debian/package.debputy-plugins/my_plugin.py
+	debian/package.debputy-plugins/my_plugin_check_foo.py
+	debian/package.debputy-plugins/my_plugin_check_bar.py
+
+If you find yourself fighting with upstream's Python test runner picking up the
+B<debputy> test, then please review the
+L</DEALING WITH UPSTREAM'S PYTHON TEST RUNNER> sections for ways to deal with it.
+
+=back
+
+=cut
+
+init();
+
+my $debputy_cmd = $ENV{'DEBPUTY_CMD'} // 'debputy';
+my @debputy_cmdline = (
+	$debputy_cmd,
+	'internal-command',
+	'dh-integration-install-plugin',
+);
+for my $package (@{$dh{DOPACKAGES}}) {
+	push(@debputy_cmdline, '-p', $package);
+}
+doit(@debputy_cmdline);
+
+=head1 DEALING WITH UPSTREAM'S PYTHON TEST RUNNER
+
+There are multiple ways to deal with upstream's python test runner picking up the
+B<debputy> test. This section is written assuming upstream is using B<py.test>
+(sometimes invoked as B<python3 -m pytest>). While the concepts should carry over
+to other test runners, the examples and configuration names will probably not
+be directly reusable.
+
+The "least" effort option is to use B<_check> instead B<_test> in the naming
+of the B<debputy> tests.  This will work for clean builds as long as the
+B<py.test> run can still I<load> the modules (which often assumes that B<debputy>
+is installed). However, on unclean (B<dpkg-buildpackage -nc>) builds, B<py.test>
+can get confused because the module implementation file is both in
+B<debian/I<pkg>.debputy-plugins> and in B<< debian/I<pkg> >>. You can `rm` the
+version under B<< debian/I<pkg> >> manually, but it gets tedious.
+
+A more involved fix is to tell B<py.test> to either stay away from the
+F<debian> directory via B<norecursedirs> OR explicitly tell it where to
+find the source and tests (B<pythonpath> + B<testpaths>). If upstream uses
+B<pyproject.toml>, this could look something like:
+
+
+	[tool.pytest.ini_options]
+	# Option A: Stay out of the "debian" dir.
+	norecursedirs = [
+		"debian",
+	]
+	# Option B: Explicitly lists where the source and tests are.
+	# In this case, `py.test` will work out of the box (without resorting
+	# to "python3 -m pytest" or similar tricks). This approach may have
+	# value for upstream for that particular reason.
+	pythonpath = [
+		"src",
+	]
+	testpaths = [
+		"tests",
+		# You may need "src" here if upstream uses --doctest-modules
+	]
+
+The upstream fix will also prevent B<py.test> from picking up the plugin
+inside B<< debian/I<package> >> directory, which makes it more robust for
+B<dpkg-buildpackage -nc> builds.
+
+=head1 SEE ALSO
+
+L<debhelper(7)>
+
+This program integrates into the debhelper suite.
+
+=head1 AUTHOR
+
+Niels Thykier <niels@thykier.net>
+
+=cut

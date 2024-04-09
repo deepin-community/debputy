@@ -1,22 +1,54 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: template-repository
-Source: https://github.com/deepin-community/template-repository
 
 Files: *
-Copyright: 2023 Tsic404 <liuheng@deepin.org>
+Copyright: 2022 Niels Thykier <niels@thykier.net>
 License: GPL-2+
- This package is free software; you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation; either version 2 of the License, or
- (at your option) any later version.
+
+Files: deb_packer.py
+Copyright: 2022 Niels Thykier <niels@thykier.net>
+           2022 Chris Hofstaedtler <zeha@debian.org>
+License: GPL-2+
+
+Files: tests/*
+Copyright: 2022 Niels Thykier <niels@thykier.net>
+           2022 Chris Hofstaedtler <zeha@debian.org>
+License: GPL-2+
+
+Files: dh_debputy
+Copyright: 1997-2011 Joey Hess <joeyh@debian.org>
+           2015-2022 Niels Thykier <niels@thykier.net>
+Comment: It is 95% copy-paste of dh_builddeb
+License: GPL-2+
+
+Files: src/debputy/lsp/* src/debputy/linting/*
+Copyright: 2022 Niels Thykier <niels@thykier.net>
+Comment: Dual-licensed with the intention that parts can be moved to debpkg-metadata.
+License: GPL-2+ or Apache-2.0
+
+Files: src/debputy/lsp/text_edit.py
+Copyright: Copyright 2017-2020 Palantir Technologies, Inc.
+           Copyright 2021- Python Language Server Contributors.
+License: Expat
+ Permission is hereby granted, free of charge, to any person obtaining
+ a copy of this software and associated documentation files (the "Software"),
+ to deal in the Software without restriction, including without limitation the
+ rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ sell copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
  .
- This package is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
+ The above copyright notice and this permission notice shall be included in all
+ copies or substantial portions of the Software.
  .
- You should have received a copy of the GNU General Public License
- along with this program. If not, see <https://www.gnu.org/licenses/>
- .
- On Debian systems, the complete text of the GNU General
- Public License version 2 can be found in "/usr/share/common-licenses/GPL-2".
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+ INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+ PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+ HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+ CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+ OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Files: src/debputy/lsp/vendoring/_deb822_repro/*
+Copyright:
+    2021       Niels Thykier <niels@thykier.net>
+License: GPL-2+
+Comment: Embedded copy of part of `python-debian` with patches. The patches are pending
+ review at https://salsa.debian.org/python-debian-team/python-debian/-/merge_requests/130

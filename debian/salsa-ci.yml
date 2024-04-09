@@ -1,0 +1,20 @@
+---
+include:
+  - https://salsa.debian.org/salsa-ci-team/pipeline/raw/master/salsa-ci.yml
+  - https://salsa.debian.org/salsa-ci-team/pipeline/raw/master/pipeline-jobs.yml
+
+variables:
+  SALSA_CI_DISABLE_WRAP_AND_SORT: 0
+  SALSA_CI_WRAP_AND_SORT_ARGS: '-abkt'
+  SALSA_CI_AUTOPKGTEST_ALLOWED_EXIT_STATUS: 0
+  SALSA_CI_DISABLE_APTLY: 0
+
+debputy-lint:
+  stage: provisioning
+  image: debian:sid-slim
+  script:
+    - apt-get update -qq && apt-get -qq install --no-install-recommends --yes dh-debputy python3-pygls
+    - PERL5LIB=lib debputy lint --spellcheck
+  except:
+    variables:
+      - $CI_COMMIT_TAG != null && $SALSA_CI_ENABLE_PIPELINE_ON_TAGS !~ /^(1|yes|true)$/

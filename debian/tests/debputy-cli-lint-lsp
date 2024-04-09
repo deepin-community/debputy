@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e -u -x
+
+debputy lint --linter-exit-code
+debputy lint --no-linter-exit-code
+debputy lsp editor-config
+debputy lsp editor-config emacs
+debputy lsp editor-config emacs+eglot
+debputy lsp editor-config vim

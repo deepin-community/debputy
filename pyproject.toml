@@ -1,0 +1,45 @@
+[tool.coverage.run]
+branch = true
+source = ["."]
+omit = [
+  "*/lib/python*/*",
+  "*/dist-packages/*",
+  "*/tests/*",
+]
+
+[tool.coverage.report]
+# Lets not force ourselves to sprinkle "pragma: no cover" in the following cases
+exclude_lines = [
+    # Have to re-enable the standard pragma
+    "pragma: no cover",
+
+    # Ignore code that is not intended to be run
+    "if TYPE_CHECKING:",
+    "raise AssertionError",
+
+    # Ignore "..." (overload)
+    "^\\s+[.][.][.]\\s*$",
+
+    # We cannot hit this via tests.  On the flip-side, we should ensure this
+    # only call a main() (or a similar function).
+    "if __name__ == .__main__.:",
+
+    # Do not complain about abstract methods as they are not run
+    "@(abc\\.)?abstractmethod",
+    "raise NotImplementedError([(][)]|\\s*$)",
+]
+
+[tool.pytest.ini_options]
+addopts = "--doctest-modules"
+norecursedirs = [
+    "local",
+    "debian",
+]
+pythonpath = [
+    "src"
+]
+testpaths = [
+    "src",
+    "tests",
+    "self-hosting-plugins",
+]
