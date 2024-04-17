@@ -1,0 +1,33 @@
+#!/bin/sh
+set -e -u -x
+mkdir "${AUTOPKGTEST_TMP}/debian"
+cp -r pyproject.toml tests/ "${AUTOPKGTEST_TMP}"
+cp -a debian/control "${AUTOPKGTEST_TMP}/debian"
+export PYTHONWARNINGS=d
+# This is a lie, but the debputy test framework will restrict certain
+# plugin loading methods otherwise and that will neuter our ability to
+# test the plugin test framework itself.  To avoid issues, we do the
+# dance below to ensure that py.test will not see the source version
+# of debputy (and accordingly cannot use the uninstalled version by
+# mistake).
+export DEBPUTY_TEST_AGAINST_INSTALLED_PLUGINS=uninstalled
+DEBPUTY_PYTHONPATH=/usr/share/dh-debputy
+PYTHOHPATH=${PYTHOHPATH:-}
+if [ "${PYTHOHPATH:-}" ]; then
+  PYTHOHPATH="${DEBPUTY_PYTHONPATH}:${PYTHOHPATH}"
+else
+  PYTHOHPATH="${DEBPUTY_PYTHONPATH}"
+fi
+
+export DEBPUTY_REQUIRE_LIBCAP=1
+
+cd "${AUTOPKGTEST_TMP}/"
+
+for py in $(py3versions -s); do
+  echo "----------------------------------------------"
+  echo "Testing with $py"
+  echo "----------------------------------------------"
+  # text mode file opening is locale dependent so try both ASCII and UTF-8
+  PYTHONPATH="${PYTHOHPATH}" LC_ALL=C $py -m pytest
+  PYTHONPATH="${PYTHOHPATH}" LC_ALL=C.UTF-8 $py -m pytest
+done

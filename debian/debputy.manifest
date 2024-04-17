@@ -1,0 +1,7 @@
+manifest-version: '0.1'
+installations:
+- install-docs:
+    sources:
+    - GETTING-STARTED-WITH-dh-debputy.md
+    - MANIFEST-FORMAT.md
+    - MIGRATING-A-DH-PLUGIN.md

@@ -1,0 +1,113 @@
+{
+  "api-compat-version": 1,
+  "known-packaging-files": [
+    {
+      "path": "debian/control",
+      "documentation-uris": [
+        "man:deb-src-control(5)",
+        "https://www.debian.org/doc/debian-policy/ch-controlfields.html#source-package-control-files-debian-control"
+      ],
+      "file-categories": ["pkg-metadata"]
+    },
+    {
+      "path": "debian/debputy.manifest",
+      "debputy-cmd-templates": [
+        [
+          "debputy",
+          "plugin",
+          "list",
+          "p-m-r"
+        ],
+        [
+          "debputy",
+          "plugin",
+          "show",
+          "p-m-r",
+          "{{TOPIC}}"
+        ]
+      ],
+      "documentation-uris": [
+        "@DEBPUTY_DOC_ROOT_DIR@/MANIFEST-FORMAT.md"
+      ],
+      "file-categories": ["pkg-helper-config"]
+    },
+    {
+      "path": "debian/rules",
+      "documentation-uris": [
+        "man:deb-src-rules(5)",
+        "https://www.debian.org/doc/debian-policy/ch-source.html#main-building-script-debian-rules"
+      ]
+    },
+    {
+      "path": "debian/gbp.conf",
+      "documentation-uris": [
+        "man:gbp.conf(5)"
+      ],
+      "file-categories": ["maint-config"]
+    },
+    {
+      "path": "debian/source/options",
+      "documentation-uris": [
+        "man:dpkg-source(1)"
+      ]
+    },
+    {
+      "path": "debian/source/local-options",
+      "documentation-uris": [
+        "man:dpkg-source(1)"
+      ]
+    },
+    {
+      "path": "debian/source/format",
+      "documentation-uris": [
+        "man:dpkg-source(1)"
+      ],
+      "file-categories": ["pkg-metadata"]
+    },
+    {
+      "path": "debian/salsa-ci.yml",
+      "file-categories": ["testing"]
+    },
+    {
+      "path": "debian/source/lintian-overrides",
+      "documentation-uris": [
+        "man:lintian(1)"
+      ],
+      "file-categories": ["lint-config"]
+    },
+    {
+      "path": "debian/source.lintian-overrides",
+      "documentation-uris": [
+        "man:lintian(1)"
+      ],
+      "file-categories": ["lint-config"]
+    },
+    {
+      "path": "debian/tests/control",
+      "documentation-uris": [
+        "https://salsa.debian.org/ci-team/autopkgtest/raw/master/doc/README.package-tests.rst",
+        "https://ci.debian.net/doc/file.TUTORIAL.html"
+      ],
+      "file-categories": ["testing"]
+    },
+    {
+      "path": "debian/watch",
+      "documentation-uris": [
+        "https://www.debian.org/doc/debian-policy/ch-source.html#upstream-source-location-debian-watch"
+      ]
+    },
+    {
+      "path": "debian/README.source",
+      "documentation-uris": [
+        "https://www.debian.org/doc/debian-policy/ch-source.html#source-package-handling-debian-readme-source"
+      ]
+    },
+    {
+      "path": "debian/shlibs.local",
+      "documentation-uris": [
+        "man:deb-shlibs(5)",
+        "man:dpkg-shlibdeps(1)"
+      ]
+    }
+  ]
+}

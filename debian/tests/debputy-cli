@@ -1,0 +1,49 @@
+#!/bin/sh
+set -e -u -x
+
+debputy --no-pager --help
+debputy --no-pager check-manifest
+
+debputy --no-pager plugin --help
+debputy --no-pager plugin list --help
+
+debputy --no-pager plugin list
+debputy --no-pager plugin list plugins
+debputy --no-pager plugin list ppf
+debputy --no-pager plugin list uppf
+debputy --no-pager plugin list manifest-variables
+debputy --no-pager plugin list manifest-variables --show-all-variables
+debputy --no-pager plugin list pmr
+debputy --no-pager plugin list automatic-discard-rules
+debputy --no-pager plugin list a-d-r
+
+
+debputy --no-pager plugin show ppf changelog
+debputy --no-pager plugin show ppf debian/changelog
+debputy --no-pager plugin show ppf service
+
+debputy --no-pager plugin show pmr --help
+
+echo "Checking installations manifest rules"
+for rule in install install-docs install-man discard ; do
+  debputy --no-pager plugin show pmr "${rule}"
+done
+
+echo "Checking binary package transformations manifest rules"
+for rule in TransformationRule::remove move create-symlink path-metadata create-directories \
+            run-build-time-tests arch-matches not build-profiles-matches cross-compiling \
+            binary-version definitions variables ::definitions definitions::variables ::; do
+  debputy --no-pager plugin show pmr "${rule}"
+done
+
+for variable in DEB_SOURCE token:TAB DEB_HOST_ARCH DEB_BUILD_ARCH; do
+  debputy --no-pager plugin show manifest-variables "${variable}"
+done
+
+for rule in python-cache-files la-files backup-files version-control-paths gnu-info-dir-file debian-dir doxygen-cruft-files; do
+  debputy --no-pager plugin show automatic-discard-rules "${rule}"
+done
+
+debputy --no-pager tool-support annotate-debian-directory
+debputy --no-pager tool-support export-reference-data --output-format=json
+debputy --no-pager tool-support export-reference-data file-categories
