@@ -1,0 +1,5 @@
+# https://salsa.debian.org/debian/debputy/-/issues/77
+missing-build-dependency-for-dh-addon debputy (does not satisfy dh-debputy:any) [debian/rules]
+missing-build-dependency-for-dh_-command dh_debputy (does not satisfy dh-debputy:any) [debian/rules]
+# https://bugs.debian.org/1067653 substvar hints are no longer universally applicable
+debhelper-but-no-misc-depends dh-debputy

@@ -1,0 +1,8 @@
+#!/usr/bin/python3
+import sys
+
+sys.path.insert(0, "/usr/share/dh-debputy")
+
+from debputy.commands.debputy_cmd.__main__ import main
+
+main()

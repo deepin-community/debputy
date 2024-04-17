@@ -1,0 +1,136 @@
+# TODO: Figure out if we can reuse these jobs but run them after our own checks without having
+#  to manually merge `stages`.
+include:
+  - https://salsa.debian.org/salsa-ci-team/pipeline/raw/master/salsa-ci.yml
+  - https://salsa.debian.org/salsa-ci-team/pipeline/raw/master/pipeline-jobs.yml
+
+
+stages:
+  - ci-test
+  - aggregate-coverage
+  - pages
+  - provisioning
+  - build
+  - publish
+  - test
+
+tests-testing:
+  stage: ci-test
+  image: debian:testing
+  script:
+    - apt-get update
+    - apt-get build-dep -y .
+    - dpkg-buildpackage -us -uc -tc
+
+tests-unstable:
+  stage: ci-test
+  image: debian:unstable
+  script:
+    - apt-get update
+    - apt-get build-dep -Ppkg.debputy.ci -y .
+    - dpkg-buildpackage -Ppkg.debputy.ci -us -uc -tc
+
+tests-unstable-coverage-without-optional-bd:
+  stage: ci-test
+  image: debian:unstable
+  script:
+    - apt-get update
+    - apt-get build-dep -Ppkg.debputy.minimal-tests,pkg.debputy.test-coverage -y .
+    - py.test-3 -v --cov --cov-branch --doctest-modules --junit-xml=xunit-report.xml --cov-report xml:coverage.xml
+    - dpkg-buildpackage -Ppkg.debputy.minimal-tests -us -uc -tc
+  after_script:
+  - mkdir -p coverage-results/tests-unstable-coverage-without-optional-bd
+  - cp .coverage coverage-results/tests-unstable-coverage-without-optional-bd/coverage
+  artifacts:
+    paths:
+      - coverage-results/tests-unstable-coverage-without-optional-bd
+    reports:
+      junit: xunit-report.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+
+tests-unstable-coverage:
+  stage: ci-test
+  image: debian:unstable
+  script:
+    - apt-get update
+    - apt-get build-dep -Ppkg.debputy.test-coverage -y .
+    - py.test-3 -v --cov --cov-branch --doctest-modules --junit-xml=xunit-report.xml --cov-report xml:coverage.xml
+  after_script:
+  - mkdir -p coverage-results/tests-unstable-coverage
+  - cp .coverage coverage-results/tests-unstable-coverage/coverage
+  artifacts:
+    paths:
+      - coverage-results/tests-unstable-coverage
+    reports:
+      junit: xunit-report.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+
+tests-unstable-coverage-with-extra-bd:
+  stage: ci-test
+  image: debian:unstable
+  script:
+    - apt-get update
+    - apt-get build-dep -Ppkg.debputy.ci,pkg.debputy.test-coverage -y .
+    - py.test-3 -v --cov --cov-branch --doctest-modules --junit-xml=xunit-report.xml --cov-report xml:coverage.xml
+  after_script:
+  - mkdir -p coverage-results/tests-unstable-coverage-with-extra-bd
+  - cp .coverage coverage-results/tests-unstable-coverage-with-extra-bd/coverage
+  artifacts:
+    paths:
+      - coverage-results/tests-unstable-coverage-with-extra-bd
+    reports:
+      junit: xunit-report.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+
+aggregate-coverage:
+  stage: aggregate-coverage
+  image: debian:unstable
+  coverage: '/(?i)total.*? (100(?:\.0+)?\%|[1-9]?\d(?:\.\d+)?\%)$/'
+  script:
+  - apt-get update -y
+  - apt-get install -y python3-coverage
+  - python3-coverage combine coverage-results/*/coverage*
+  - python3-coverage html -d coverage-report
+  - python3-coverage report
+  artifacts:
+    paths:
+    - coverage-report
+  dependencies:
+  - tests-unstable-coverage
+  - tests-unstable-coverage-without-optional-bd
+  - tests-unstable-coverage-with-extra-bd
+
+pages:
+  stage: pages
+  script:
+  - mkdir public
+  - mv coverage-report public/
+  dependencies:
+  - aggregate-coverage
+  artifacts:
+    paths:
+    - public
+  only:
+  - main
+
+variables:
+  SALSA_CI_DISABLE_WRAP_AND_SORT: 0
+  SALSA_CI_WRAP_AND_SORT_ARGS: '-abkt'
+  SALSA_CI_AUTOPKGTEST_ALLOWED_EXIT_STATUS: 0
+  SALSA_CI_DISABLE_APTLY: 0
+
+debputy-lint:
+  stage: ci-test
+  image: debian:sid-slim
+  script:
+    - apt-get update -qq && apt-get -qq install --no-install-recommends --yes dh-debputy python3-pygls
+    - PERL5LIB=lib debputy lint --spellcheck
+  except:
+    variables:
+      - $CI_COMMIT_TAG != null && $SALSA_CI_ENABLE_PIPELINE_ON_TAGS !~ /^(1|yes|true)$/

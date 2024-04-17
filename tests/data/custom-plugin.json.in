@@ -1,0 +1,16 @@
+{
+  "plugin-initializer": "custom_plugin_initializer",
+  "api-compat-version": 1,
+  "packager-provided-files": [
+    {
+      "stem": "test-file-from-json",
+      "installed-path": "/usr/share/test-files/{name}.test",
+      "default-mode": "0644",
+      "allow-name-segment": true,
+      "reference-documentation": {
+          "description": "test of loading PPFs from a JSON",
+          "format-documentation-uris": ["man:ls(1)"]
+      }
+    }
+  ]
+}

@@ -1,5 +1,1388 @@
-template-repository (1.0-1) unstable; urgency=medium
+debputy (0.1.28) unstable; urgency=medium
 
-  * Initial release
+  [ Niels Thykier ]
+  * LSP/Lint:
+    - Fix missing `binary-targets` value for R³
+    - Emit multiple issues for the same value if applicable in deb822 files
+    - Detect exclusive values used with other values in deb822 files. Examples
+      include `any` or `all` in the `Architecture` field.
+    - Add `hover` docs to `debian/copyright` fields.
+    - Add basic support for cross-file data reference. As an example,
+      the `debputy.manifest` code can now determine which packages are
+      listed in `debian/control`. Additionally, the `debian/changelog` checks
+      will now assert that the source package name in the newest entry match
+      the `Source` field of `debian/control`.
+    - Provide specialized hover docs for `debian/control` that provides
+      specialized help for the synopsis part of the `Description` field.
+    - The hover docs for `debian/control` will now provide hover docs for
+      some substvars.
 
- -- Tsic404 <liuheng@deepin.org>  Sat, 28 Jan 2023 13:46:49 +0800
+  * debputy: `lsp features` now reports if general features are missing
+  * d/copyright: Add missing `GPL-2+` and missing `Apache-2` license stanzas
+
+  [ Andrea Pappacoda ]
+  * `debputy lsp editor-configs`: Add `yegappan`'s VIM LSP.
+    (https://github.com/yegappan/lsp).
+
+ -- Niels Thykier <niels@thykier.net>  Wed, 10 Apr 2024 13:32:34 +0000
+
+debputy (0.1.27.1) unstable; urgency=medium
+
+  [ David Kalnischkies ]
+  * Improve LSP hover docs:
+    - Don't encode <> in Uploaders field description
+    - Use consistently markdown */** instead of <em>/<b>
+    - Use markdown <automatic links> for URIs in text
+    - Define all allowed priorities only once
+    - Use **Example**: consistently in descriptions
+    - Format text consistently with `file` and `path/`
+
+  [ Niels Thykier ]
+  * LSP/Lint: Fix typo in `Upstream-Contact` field.
+    Thanks to gregor herrmann <gregoa@debian.org> (Closes: #1068523)
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 07 Apr 2024 08:18:06 +0200
+
+debputy (0.1.27) unstable; urgency=medium
+
+  * LSP/Lint:
+    - Disable automatic syntax check of makefiles (`debian/rules`)
+      by default. The `make` man page strongly implies that it "may"
+      run code, which will be unhelpful to anyone using `debputy lint`
+      to review packages.
+    - The `debputy.manfiest` diagnostics now flag conflicting
+      attributes in the manifest. Previously, these were only flagged
+      by `debputy check-manifest` or during build.  (Closes: #85)
+    - When there is a typo of a keyword in `debputy.manifest` with one
+      obvious solution, the linting will continue linting based on
+      the corrected key rather than the original key.
+    - Improve the `debputy.manifest` diagnostics to cover deeper into
+      the manifest. Among other, it now offers some validation of
+      `ManifestCondition` (`when:`).
+
+  [ Niels Thyker ]
+  * Add `python3-levenshtein` to Suggests.
+
+  [ David Kalnischkies ]
+  * Fix a number of typos and other spelling related issues.
+  * Reformat files to remove trailing whitespace
+
+ -- Niels Thykier <niels@thykier.net>  Sat, 06 Apr 2024 12:23:44 +0200
+
+debputy (0.1.26) unstable; urgency=medium
+
+  * LSP/lint:
+    - Make debputy.manifest completer better at accounting for conflicting
+      keywords such as `as` vs. `sources` in `install`.
+    - The debputy.manifest completer now provides completions in more cases.
+    - Add basic support `debian/tests/control`. Note that `elpa-dpkg-dev-el`
+      does not support it yet in unstable (in git, expected to be 37.22) and
+      `vim` does not seem  to have support for it.
+
+  * migrate-from-dh:
+    - Provide migration advice for known hook targets. Additionally, hook
+      targets with migration advice no longer triggers an unsupported
+      feature error (only a manual migration warning).
+      (Closes: debputy#78)
+
+  * lint: Fix crash bug when auto-fixing something at the start of a file
+
+ -- Niels Thykier <niels@thykier.net>  Thu, 04 Apr 2024 12:36:11 +0200
+
+debputy (0.1.25) unstable; urgency=medium
+
+  * LSP/lint:
+    - Provide initial hover docs for `d/debputy.manifest`.
+    - Provide initial completion support for `d/debputy.manifest`.
+    - Provide more diagnostics for `d/debputy.manifest`. Note that
+      `debputy check-manifest` still covers a lot more, but it usually
+      only reports one issue at the time and does not work with the LSP.
+    - When the editor does not provide a language id for the files,
+      `debputy` now attempts to guess the language from the filename.
+      This makes the language server work with most editors that do
+      not know about the file format (such as `debian/debputy.manifest`).
+
+  [ Niels Thykier ]
+  * d/copyright: Dual license linter and LSP, since that makes it easier
+    to share code with `debpkg-metadata`.
+  * debputy: Add YAML mode (debputy.manifest) to emacs LSP editor config
+    example.
+  * LSP/lint: Fix crash bug with some errors in debputy.manifest
+  * Migrate to `python3-ruyaml` as default. It has fewer arch:any
+    dependencies, which in turn should make arch bootstrapping easier.
+    (Closes: debputy#84)
+  * debputy: Make `debputy lsp editor-config` list known config names.
+    Thanks to David Kalnischkies <david@kalnischkies.de> (Closes: debputy#82)
+  * LSP: Fallback to filename based detection if no language id is provided
+
+  [ Otto Kekäläinen ]
+  * Add Lintian overrides
+  * Add Salsa-CI to both build packages, and to run `debputy lint` on itself
+
+ -- Niels Thykier <niels@thykier.net>  Thu, 04 Apr 2024 07:18:03 +0200
+
+debputy (0.1.24) unstable; urgency=medium
+
+  * Manifest:
+    - Add new keyword `services` under `packages.foo`, where the
+      packager can specify whether a given service or (systemd) unit
+      should be enabled/started on installation and how upgrades
+      should be managed. With this, more packages using
+      `dh_installsystemd` and `dh_installinit` can hopefully now use
+      `debputy`. Note user services is mentioned in the manifest
+      feature, but `debputy` does not actually detect any user
+      services.
+
+  * Plugin API:
+    - Detect duplicate service registrations and error out when
+      detected. The API is private, so it will not affect any
+      plugins outside `debputy`.
+
+  * debputy: Service maintscript snippets are now run in "service" order
+  * autopkgtests: Run `debputy lint` with the linter exit code
+  * debputy: Fix crash on re-encoding compressed man pages.
+    Thanks to Andrey Rakhmatullin <wrar@debian.org> (Closes: #1068102)
+  * debputy: Fix bug in -dbgsym generation that triggered lintian warnings.
+    Thanks to Chris Hofstaedtler <zeha@debian.org> (Closes: debputy#80)
+  * debputy: Fix crash bug on showing a pluggable-manifest-rule with
+    certain mutual exclusive attributes
+  * debputy: Fix `plugin show p-m-r` to show mutual exclusive optional attributes
+  * debputy: Avoid using `try-restart` as `deb-systemd-invoke` does not
+    support it. Replace it with regular `restart`.
+  * The getting started guide now features a section on migrating
+    `dh_installsystemd` and `dh_installinit` overrides.
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 31 Mar 2024 17:31:02 +0200
+
+debputy (0.1.23) unstable; urgency=medium
+
+  * Breaking: Migration mode to `dh-sequence-zz-debputy-rrr`
+    should have included `dh_shlibdeps`, but did not due to a
+    mistake. This broke automatic substvar support and has been
+    retroactively fixed. Likewise, `debputy migrate-from-dh` has
+    been updated to detect hook targets for `dh_shlibdeps`.
+
+ -- Niels Thykier <niels@thykier.net>  Fri, 29 Mar 2024 08:41:42 +0100
+
+debputy (0.1.22.3) unstable; urgency=medium
+
+  * debputy: Fix typo of `type-mapping` suggestion in output
+  * debputy lint: Fix bug where errors on the first or last line
+  * lint/LSP: Provide a few "generic" field level validations. As
+    an example, the values of the `Package` and `Source` fields are
+    now checked against the standard regex for the validating
+    package names.
+  * debputy: Enable `lint` to run with invalid `debian/control` file.
+    As example, if a package stanza is missing the `Architecture`
+    field or is syntactically invalid, then the linter will now still
+    run and report this linting errors (rather than `debputy` hard
+    stopping on the first issue).
+
+ -- Niels Thykier <niels@thykier.net>  Thu, 28 Mar 2024 11:37:22 +0100
+
+debputy (0.1.22.2) unstable; urgency=medium
+
+  * Restore registration of `conffiles` in `dh-sequence-debputy`
+    integration.  Thanks to Sven Joachim <svenjoac@gmx.de>
+    for reporting the bug. (Closes: #1067860)
+  * LSP: Add `XB-Installer-Menu-Item` as a known field
+
+ -- Niels Thykier <niels@thykier.net>  Thu, 28 Mar 2024 08:41:14 +0100
+
+debputy (0.1.22.1) unstable; urgency=medium
+
+  [ Sven Joachim ]
+  * debputy: fix update-alternatives call in generated prerm script
+
+  [ Niels Thykier ]
+  * lint: Fix crash bug when running the linter
+
+ -- Niels Thykier <niels@thykier.net>  Thu, 28 Mar 2024 07:52:57 +0100
+
+debputy (0.1.22) unstable; urgency=medium
+
+  [ Niels Thykier ]
+  * migrate-from-dh:
+    - Fix bug where some dh config lines were migrated wrong
+
+  * LSP/Lint:
+    - Provide better "guards" for `debian/rules` and `debputy.manifest`.
+      Since the LSP is accepting generic languages here for compatibility,
+      it should not apply to all instances of those generic languages.
+    - Add basic semantic token and folding range support for comments
+      in deb822 based files.
+    - Detect and leverage trivial cases of `dh ... --with addon` for
+      better precision.
+    - Fix the quick fix handler in LSP mode. It was disabled by mistake
+      due to some refactoring.
+    - Add some basic checks of the changelog sign off dates.
+
+  * CLI Breaking change: Rename `plugable` to `pluggable` in API
+    and command line interface. The relevant API is currently
+    "private-only", which is why this is not listed under a
+    "Plugin API" heading.
+
+  * LSP editor-config: Correct snippet for `vim+ycm`
+  * LSP editor-config emacs: Recommend elpa-markdown-mode
+  * Fix warning about -dbgsym packages for automatic M-A: same
+  * d/control: Add 3.11 version bound on python for now
+  * Improve migration from `dh` related documentation.
+  * Fix bug where `dpkg-gencontrol` could error out on dbgsym packages.
+    Fundamentally the same as debhelper's #1067711.
+
+  [ Otto Kekäläinen ]
+  * Apply 'wrap-and-sort -abkt'
+  * Fix misc spelling errors
+
+ -- Niels Thykier <niels@thykier.net>  Wed, 27 Mar 2024 07:42:58 +0100
+
+debputy (0.1.21) unstable; urgency=medium
+
+  * Plugin API:
+    - VirtualPath API: The `lookup` method now resolves symlinks if
+      necessary
+    - VirtualPath API: Provide `interpreter` method to resolve the
+      interpreter of a file (based on the `#!`-line).
+
+  * migrate-from-dh:
+    - Support different integration levels using the new --migration-target
+      option with defaults derived from existing packaging where possible.
+
+  * debputy: Code better with faulty optional plugins (Closes: debputy#73)
+  * README.md: Document communication channels
+  * debputy: Accept usr/lib/MA/Package as private python dir
+  * debputy: Provide `plugin {list,show} type-mappings` subcommand
+  * debputy: Preserve name of mapped type in most cases for plugin show p-m-r
+  * d/changelog: Typo fixes and re-align some entries that were "too long".
+  * Preserve mtime from ref_path where possible
+  * Fix bug where `binary-version` from the manifest was not used
+  * Add minimal `R³ dh` integration mode for `util-linux` and other packages
+    that want to migrate away from `fakeroot`.  Use
+    `debputy migrate-from-dh --migration-target dh-sequence-zz-debputy-rrr`
+    to get migration aid for this integration mode.
+  * debputy: Make `mtime` resolution more robust (Closes: debputy#75)
+  * Auto-correct common interpreters
+  * Update handling of `t64:Provides` to match debhelper
+  * debputy: Fix crash bug when packages did not use debhelper
+  * debputy: Avoid passing the substvars file to dh_gencontrol for -dbgsym
+    packages
+  * debputy: Automatically apply relationship substvars. See
+    https://lists.debian.org/debian-devel/2024/03/msg00030.html for
+    details.
+  * debputy: Use `shlibs:Pre-Depends` by default for essential packages
+  * Implement initial Language Server based on `pygls` and linter.  With this
+    comes the following new subcommands:
+    - `debputy lsp server` starts the language server to support editors
+      with Debian packaging files.
+    - `debputy lsp editor-config NAME` provides config snippets for
+      known editors.
+    - `debputy lsp features` provides a human readable list of features
+      and language IDs currently supported. Mostly useful for people
+      trying to determine what to put in their editor config where
+      `debputy lsp editor-config` cannot help them.
+    - `debputy lint` provides a "batch" (non-interactive) version of
+      the diagnostics that `debputy lsp server` provides for the case
+      where you want these without an editor as intermediate (or
+      where you editor does not support LSP).
+
+    Most of these features will require optional dependencies. Check the
+    Recommends and Suggests for packages that may be relevant for you.
+    The `debputy` man page has a section on how `debputy lint` relates
+    to other tools such as `debputy lsp` and `lintian`.
+
+  * Vendor a copy of the `python-debian` RTS parser until the relevant
+    features are merged into `python-debian`.
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 24 Mar 2024 11:29:19 +0100
+
+debputy (0.1.20) unstable; urgency=medium
+
+  * Plugin API:
+    - Support cross package content checks in metadata detectors.
+      The feature prevents the metadata detector from "unsafe"
+      access to other packages. As an example, arch:any packages
+      can never see the content for arch:all packages (since
+      they are not always built together).
+
+  * migrate-from-dh:
+    - Add migration support for the `sodeps` sequence along with its
+      related `so:Depends` substvar.
+
+  * debputy: Support the `X-Time64-Compat` field as used by `debhelper`
+  * debputy: Tweak wording of automatic-discard-rules examples in
+    the output of `debputy plugin show a-d-r ...`.
+  * debputy: Accessibility related changes:
+    - Add CSV output for *human* consumption on many of the plugin
+      list commands. This enables easier consumption for screen
+      readers when the user wants structured data. Note the CSV
+      is *not* guaranteed to remain stable for scripting purposes.
+    - Do not describe the table for screen readers. Instead,
+      generate the ASCII table again but without the divider
+      lines, which would just be line noise.
+    - Revert on URL rewriting of man pages for screen readers. For now
+      also disable creating urls when the link text is not equal to
+      the url as it is not clear how the screen reader reacts to the
+      hyperlinks.
+  * debputy: Fix automatic pager feature not working as intended.
+    This was a regression in the previous release.
+  * debputy.pod: Improve `debputy` man page. Among other,
+    document more subcommands. Example, `migrate-from-dh` was
+    not documented previously.
+  * debputy: Provide a better error message for
+    `--plugin ./fake/debputy.json`.  It never worked and now you
+    just get a better error message than `debputy` saying that
+    `debputy` was already loaded.
+  * debputy: Support bug#950723 style pkgfiles when `dh_assistant`
+    announces it for `annotate-debian-directory`.
+  * debputy: Fallbackless only applies to files without an explicit
+    package. Unclear whether it could be abused or cause issues.
+  * debputy: Make ASCII list headers bold face for terminal output.
+  * debputy: Generate `libfooX (= ${binary:Version})` `misc:Depends`
+    via libfoo.so symlink. This largely replaces `dh_sodeps.
+  * d/changelog: Fix typo in a previous entry.
+
+ -- Niels Thykier <niels@thykier.net>  Wed, 31 Jan 2024 21:14:21 +0100
+
+debputy (0.1.19) unstable; urgency=medium
+
+  * Plugin API:
+    - Breaking change (JSON-only): Group reference documentation
+      attributes for packager provided files under the new
+      `reference-documentation` attribute.
+
+  * debputy: Fix double inverted boolean
+  * debputy: Improve the command output in multiple ways
+    - When users set `OPTIMIZE_FOR_SCREEN_READER=1`, `debputy` now
+      prints less visualization. Notably, ASCII formatting such as
+      underlying is removed. Some commands now also uses a more
+      textual description rather than a visual output. As the
+      poster example, compare `debputy plugin show a-d-r la-files`
+      with and without this option.
+    - Documentation URLs are now rendered as clickable links for
+      terminal emulators that support the relevant ANSI escape
+      sequence. When optimizing output for screen readers,
+      `man:name(section)` URIs are unconditionally written to
+      their `https://manpages.debian.org/name.section` as man pages
+      are generally not working very well with screen readers
+      unlike HTML based documentation.
+    - With `python3-colors`, output now uses a bit more
+      formatting such as boldface text when outputting to a
+      terminal.
+  * debputy: Fix crash when doing `annotate-debian-directory` on a
+    `debputy`-based package
+  * d/changelog: Document plugin API change in 0.1.18
+  * Move `lua` plugin into a separate folder to avoid failing in
+    autopkgtests.
+  * d/tests/debputy-cli: Fix invalid usage of a subcommand that
+    failed the test.
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 28 Jan 2024 16:12:42 +0100
+
+debputy (0.1.18) unstable; urgency=medium
+
+  * Plugin API:
+    - Packager Provided Files can now reference documentation
+      in the form of a generic description and URIs documenting
+      the file format.
+
+  * Plugins:
+    - Add `perl-openssl` plugin to mirror `dh-perl-openssl`.
+
+  * debputy: Refactor to make root level partly introspectable
+  * migrate-from-dh: Avoid asking users to remove Build-Depends
+    on dh sequences that are replaced. This is because they often
+    also provide relevant dependencies that the `debputy` plugin
+    dependency cannot provide (as long as the plugin is provided
+    by `dh-debputy`).
+  * Added partial migration of the `dh-lua` sequence. It is not
+    installed because the `lua` debhelper build system uses
+    build-time `d/pkg.install` files, which are not supported
+    by `debputy`. Omitted the migration code for `lua` as it
+    would just lead to false-hopes and broken hearts!
+  * debputy: Provide a `show` for packager provided files
+  * debputy: Provide a `used-packager-provided-files` list topic
+  * debputy: Add new `tool-support` command with the following
+    subcommands:
+    - annotate-debian-directory: Will scan the `debian` directory
+      for known packager files and annotate with hints and
+      documentation URIs. Data partly sourced from plugins and
+      from `dh_assistant`. Output is always JSON.
+    - export-reference-data: Provides access to reference data
+      used in other commands. Outputs text by default, but
+      supports `--output-format=json` for json exports.
+    - supports-tool-command: Test whether a particular
+      `tool-support` command is supported (without having to
+      parse `--help` output).
+  * debputy: Avoid printing `Loading plugin` in all sub commands
+  * Support nested `TypedDict`s in the declarative parsers
+
+ -- Niels Thykier <niels@thykier.net>  Sat, 27 Jan 2024 20:54:33 +0100
+
+debputy (0.1.17) unstable; urgency=medium
+
+  * Plugin API:
+    - VirtualPath: Introduce `size` attribute to simplify some code
+
+  * debputy: Auto-detect and provide maintscripts for pam-config files.
+    Specifically, add the `pam-auth-update` call to relevant
+    maintscripts.
+  * MANIFEST-FORMAT.md: Clarify conflict resolution description
+  * debputy: Tweak the wording of the reference documentation placeholder
+    for when a plugin does not provide any (online) documentation.
+  * debputy: Refactored some internals to add a (non-public) plugin
+    infrastructure for adding parsing hooks to `packages.<PKG>`.
+    As a side-effect:
+    - `debputy plugin list/show p-m-r` can now access and describe these
+      hooks.
+    - The `show` output for these rules that reference certain other
+      rules now report them by their type name. As an example,
+      `when` is now described as a `ManifestCondition` rather than
+      `string or mapping`. This provides better traceability between
+      the rules.
+  * debputy: Fix bug in generated scripts for `clean-after-removal`
+    where a start quote (`"`) was missing.
+  * debputy: Fix bug where Installed-Size was wrong for -dbgsym packages
+    (it incorrectly excluded the size for anything in the data.tar).
+  * debputy: Fix online description for `not`, which was a copy-waste
+    from another rule.
+
+ -- Niels Thykier <niels@thykier.net>  Sat, 20 Jan 2024 11:18:45 +0100
+
+debputy (0.1.16) unstable; urgency=medium
+
+  * migrate-from-dh:
+    - Remove `d/tmp` from sources in d/install files. Having
+      `d/tmp` in the paths would not work the same without an
+      explicit `as` or `dest-dir`.
+
+  * debputy: Fix crash when showing certain plugable-manifest-rules
+  * d/changelog: Avoid using `install-{,-doc}-as` like it is an install
+    rule. It was used as a short-hand for `install` (or `install-doc`)
+    with the `as` attribute but implied you could write `install-as`
+    in the manifest.
+  * docs: Correct the description of `required-when` for `discard`
+  * debputy: Fix source date epoch for strip-nondeterminism with
+    binNMU builds.
+  * Test API: Provide features to validate/test manifest variables
+  * d/tests/debputy-cli: Add tests for recent broken doc
+  * test: Add negative test for automatic discard rule example checks
+  * d/control: Add dependency on `man-db` needed to run `man-recode`.
+    Previously, we relied on the `debhelper` to pull this dependency.
+  * THANKS.md: Acknowledge Paul Gevers for his early adoption and
+    testing.
+  * debputy: Incomplete support for `dh_installdebconf`. Any debconf
+    templates (such as `debian/templates`) will now be processed and
+    lead to a `DEBIAN/templates` file in the resulting deb and the
+    `postrm` will run `db_purge` on `purge`. However, it is not possible
+    to provide a `DEBIAN/config` or custom `postinst` snippets leveraging
+    the debconf templates. Accordingly, the migration tool still flags
+    `templates` files as unsupported for now.
+  * debputy.pod: Provide man page for `debputy` itself.
+
+ -- Niels Thykier <niels@thykier.net>  Mon, 08 Jan 2024 15:44:03 +0100
+
+debputy (0.1.15) unstable; urgency=medium
+
+  * manifest:
+    - Support `capabilities` via `path-metadata` (Closes: debputy#62)
+
+  * debputy: Fix regression where maintscripts would not be generated.
+  * debputy: Fix a bug where `systemctl daemon-reload` would always
+    be added to postrm.
+
+ -- Niels Thykier <niels@thykier.net>  Fri, 29 Dec 2023 17:30:54 +0100
+
+debputy (0.1.14) unstable; urgency=medium
+
+  * manifest:
+    - Breaking change: The `discard` rule must now match at least one
+      path by default when it applies to at least one existing
+      search directory.
+    - Breaking change: Renamed `when` to `required-when` for `discard`
+      rules. The name better reflects that the `discard` rule is
+      always applied. The conditional decides whether it is an error
+      for a path to match nothing
+    - Support `**/non-glob` as a basename match.  This form must use
+      the leading `**/` part to be a basename match. Without the leading
+      `**/`, the pattern would be interpreted as an exact path match
+      for a top-level file/directory.
+
+  * migrate-from-dh:
+    - List `dh_install` as replaced which ensures `debputy` will
+      detect overrides/hook targets for `dh_install`.
+
+  * debputy: Align md5sums order with `dh_md5sums` to reduce the diffs
+    between a `debhelper` and a `debputy` produced `.deb`.
+  * debputy: Support processing files with `strip-nondeterminism` to
+    reduce the amount of non-deterministic content in a package.
+
+ -- Niels Thykier <niels@thykier.net>  Thu, 28 Dec 2023 17:39:07 +0100
+
+debputy (0.1.13) unstable; urgency=medium
+
+  * Manifest:
+    - Support per-package installation search directories via the new
+      `installation-search-dirs` attribute (under `packages.*`) .
+    - The `discard` install rule now accepts a `search-dir`/`search-dirs`
+      attribute, which can be used to restrict which search directories
+      the discarding applies too.
+    - Added new `multi-dest-install` rule for the rare case where a
+      package needs to install the same source *twice*.  This was needed
+      for `kafs-client`.  (Closes: debputy#66)
+    - Any `udeb` packages are ignored when install-doc (etc.) evaluates
+      default for `into`. This means if a source package only builds a
+      single `deb` plus one or more `udeb`s, then `into` is now optional
+      for all documentation related `install-X` rules.
+
+  * migrate-from-dh:
+    - Support migrating multi-dest sources in d/install.
+
+  * Plugin API:
+    - VirtualPath API: Use of `path.replace_fs_path_content` no longer
+      detaches the path
+
+  * debputy: Fix `FileNotFoundError` when building `udeb` packages
+  * debputy: Fix bug where install rules with multiple `into` did not
+    always work correctly
+  * debputy: Fix online documentation for `into` in most install rules
+  * debputy: Fix bug where `shlibs` where not generated when it should
+    have been.  This was a regression introduced in 0.1.10.
+  * debputy: Let dpkg-shlibdeps see SONAMEs from other packages. This
+    was necessary for `kafs-client`.  (Closes: debputy#66)
+  * debputy: Fix bug where plugin provided triggers were silently
+    discarded.
+
+ -- Niels Thykier <niels@thykier.net>  Mon, 25 Dec 2023 22:41:13 +0100
+
+debputy (0.1.12) unstable; urgency=medium
+
+  * Plugin API:
+    - Test API: Breaking change. Make metadata related tests stateless
+    - `VirtualPath` API: Add an `is_executable` property
+
+  * migrate-from-dh:
+    - Assume minimum compat of 12 for all packages now to match the
+      `dh_installinit` mechanics that `debputy` now perform when an
+      `init` script is present.
+
+  * d/control: Use `Debian-based` in the description to appease lintian
+  * d/control: Canonicalize the URL in the Vcs-Browser field
+  * d/control: Use `debputy@packages.debian.org` as maintainer address
+  * debputy: Tweak wording for several error messages
+  * Add initial support for service management.  It covers the default
+    flow of `dh_installinit` and `dh_installsystemd`. Notably, the
+    `dh_installsystemduser` is *not* covered.
+  * Fix bug in `install-man` rule that made it unusable
+  * Internal refactoring (notably of the installation rules code).
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 17 Dec 2023 18:08:13 +0000
+
+debputy (0.1.11) unstable; urgency=medium
+
+  * Manifest:
+    - Breaking change: Correct spelling of `build-profiles-matches`
+      so it now matches the documentation.
+    - The `install-docs` rule now supports `dest-dir` and `as`. Its
+      default `dest-dir` remains the same.
+    - Provide `path:GNU_INFO_DIR` manifest variable that represents
+      the directory where GNU info files should be installed into.
+
+  * Plugin API:
+    - VirtualPath now supports `open` with buffering.
+    - When declaring manifest snippets, automatically pick up
+      `FileSystemMatchRule` (and subclasses) up as `path hints` (used
+      to provide context for error messages)
+
+  * migrate-from-dh:
+    - Improve some error messages to provide the actual file path
+      instead on an internal object name/id.
+    - Fix detection of `dh-exec` conditionals that could cause the
+      conditions to be interpreted as literal values rather than
+      conditionals.
+    - Support `dh-exec` conditionals in `d/install`.
+    - Provide more support for dh-exec features in d/manpages. Notably,
+      `SOURCE => DEST` is now rewritten into an `install-doc` (with `as`)
+      rule and conditionals are now supported.
+    - Multiple conditions in `d/links` files are now supported
+      and will be translated into an `all-of`.
+    - Avoid single-item `sources` for migrated bash-completions.
+      (Style-only change)
+    - Create a placeholder variable for unknown manifest variables.
+      Previously, it would result in a hard error as the resulting
+      manifest could not be parsed. (Closes: debian/debputy#65)
+    - Support migrating `d/info` files
+
+  * debputy: Convert transformation and install rules to using
+    `FileSystemMatchRule`s for paths.  This unifies parsing of globs for
+    all rules except `clean-after-removal` (which still uses shell glob
+    semantics).
+  * online doc for path-metadata: Fix copy-paste mistake
+  * Fix crash bug where `d/tmp` is not a directory but an install rule is
+    used (unclear if this was reproducible in older versions).
+  * debputy: Fix internal error by `debputy` setting wrong "CoW"-flag on
+    some paths
+  * d/changelog: Clarify wording of a previous entry and fix a few typos.
+  * debputy: Correct two error messages that should have shown valid attribute
+    names when incorrect values were provided.
+  * debputy: Fix bug in parsing of `all-of` and `any-of` manifest conditions
+    that made it impossible to use these manifest conditions.
+  * tests: Provide initial tests of basic install rules. Required some
+    refactoring related to the virtual file system to support these
+    tests.
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 10 Dec 2023 14:40:05 +0000
+
+debputy (0.1.10) unstable; urgency=medium
+
+  * Manifest changes:
+    - Support `clean-after-removal` feature, where you can ask
+      `debputy` to remove files when the package has been removed
+      or is being purged.  This feature is similar in spirit to
+      `rpm`'s `%ghost` files.  (Closes: debputy#35)
+
+
+  * plugin API: Fix bug where `path.chmod("symbolic-mode")` would
+    raise an exception
+  * debputy: Defer error'ing out when dpkg-gensymbols returns with a non-zero
+    exit code until all packages have been processed
+  * debputy: Optimize materialization to require less copying via
+    the following features:
+    - Properly implement lazy copy-on-write actions to avoid
+      copying a file into the scratch directory only to copy it
+      to the materialization directory later.  Now, the case
+      only performs one copy (directly from the source to the
+      materialization directory).
+    - When a file has already been copied into the scratch
+      directory because `debputy` needed to mutate the file,
+      use a `mv` rather than a `cp` to move the file to its
+      final destination.
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 03 Dec 2023 16:01:57 +0100
+
+debputy (0.1.9.3) unstable; urgency=medium
+
+  * migrate-from-dh:
+    - Support full migration of `dh-sequence-numpy3`. Though, there
+      is still no `dh-sequence-python3` migration support, which
+      may make this less useful at the moment.
+  * tests: Fix bug where `debputy` provided plugins fails in
+    installed mode causing `debputy` autopkgtests to fail.
+  * tests: Improve test coverage for gnome plugin.
+
+ -- Niels Thykier <niels@thykier.net>  Wed, 29 Nov 2023 21:24:15 +0100
+
+debputy (0.1.9.2) unstable; urgency=medium
+
+  * gnome plugin: Fix broken version in substvars and add a basic
+    regression test.
+  * debputy: Some internal refactoring.
+
+ -- Niels Thykier <niels@thykier.net>  Tue, 28 Nov 2023 19:23:53 +0100
+
+debputy (0.1.9.1) unstable; urgency=medium
+
+  * plugin test API: Enable the test API to validate ADR examples
+  * debputy: Skip compression of .html/.htm files.
+    Thanks to Sven Joachim <svenjoac@gmx.de> (Closes: #1057001)
+  * debputy: Special-case doc-base files to minimize delta between
+    `debputy` and debhelper.
+
+ -- Niels Thykier <niels@thykier.net>  Mon, 27 Nov 2023 22:01:14 +0100
+
+debputy (0.1.9) unstable; urgency=medium
+
+  * Plugin changes:
+    - Breaking change: The features of the `bash-completion`
+      plugin has been embedded into the `debputy` plugin.  The
+      `bash-completion` plugin has been removed without a
+      backwards compatibility feature.
+    - Breaking change (test-api): The `virtual_path` function
+      got renamed to `virtual_path_def` and got promoted to
+      the non-test API.
+    - Add more features to the `VirtualPath` API.  Notably some
+      mutations are now supported when the file system is in
+      read-write mode.
+    - InstallRule's no longer accept an explicit search dir.
+      Search dir handling is now done differently and plugins
+      are not involved in that process.
+
+  * migrate-from-dh:
+    - Support full migration of `dh-sequence-bash-completion`.
+    - Support partial migration of `dh-sequence-gnome`.  The
+      `dh_gnome` side will be migrated, but `dh_gnome_clean`
+      will still be done via the `dh-sequence-gnome`.
+    - List which `dh-sequence-X` Build-Dependencies should be
+      removed. These are listed as manual migrations.
+    - Migration now detects *simple* cases of `dh` addons
+      loaded via `--with` in `debian/rules`.
+
+  * Let `debputy` handle loading of additional variables
+  * d/changelog: Reformat line in the 0.1.8 entry
+  * MANIFEST-FORMAT.md: Correct name of two example manifest variables
+  * MANIFEST-FORMAT.md: Improve documentation related to manifest variables
+  * Add private plugin api for package processors and migrate some
+    `debputy` code to use this feature.
+  * debputy: Provide a `clean .la files` feature by default based on a
+    similar feature from `dh_gnome`.
+  * debputy: Filter out doxygen related cruft (replacing `dh_doxygen`)
+  * Make discard rules a plugin provided feature (currently private)
+    and provide (validated) examples for automatic discard rules.
+    These can be seen via the example command:
+      `debputy plugin list a-d-r doxygen-cruft-files`
+  * debputy: Show which paths have been matched by an automatic discard
+    rule in the build out along with how to override them.
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 26 Nov 2023 15:20:44 +0100
+
+debputy (0.1.8) unstable; urgency=medium
+
+  * Manifest changes:
+    - Breaking change: Rename some manifest variables like `{{TAB}}`
+      `{{token:TAB}}`. This change only affects manifest variables
+      intended to provide textual tokens that might be hard to write
+      literally or to avoid triggering substitution of another manifest
+      variable.
+    - Split `arch-matches` condition into three.  The `arch-matches`
+      is still preferred. The other two variants are for special-cases
+      related to cross-building. As a side-effect of this change,
+      `arch-matches` can now be used in source context.
+    - Support manifest declared variables.  A new `definitions.variables`
+      key is defined where variables can be declared. See
+      MANIFEST-FORMAT.md for the details. (Closes: debputy#58)
+    - It is now possible to use substitution variables in package names
+      in the manifest. This enables the use of `libfoo{{SONAME}}` instead
+      of hard-coding the value.
+
+  * Plugin changes:
+    - Breaking change: Remove the previously required plugin-version
+      attribute.
+    - Streamline installation process for "simple" `debputy` plugins by
+      providing a debhelper tool and by having `debputy` take
+      responsibility for the Python byte-compilation requirement for
+      `debputy` plugins. Additionally, support for running plugin tests
+      have been added too (both as build-time and as installed tests).
+    - Breaking (test-only) change: The test API for loading plugins have
+      been renamed and should no longer be passed a JSON descriptor file.
+      Instead, the test framework will attempt to find the JSON descriptor
+      file on its own. With this method, the test does not have to
+      distinguish between install-time and build-time test runs.
+    - A metadata detector can now request the binary package version
+      of a package via the context parameter.
+    - Plugins can now provide literal manifest variables like `path:FOO_DIR`.
+
+  * debputy: Provide online documentation for most manifest rules
+  * debputy: Correct detection of required/conditional fields in
+    `plugin show pmr`
+  * debputy: Provide "on-line" documentation of manifest conditions
+  * MANIFEST-FORMAT.md: Correct some anchors that would cause broken links
+    in HTML rendered versions of the file.
+  * MANIFEST-FORMAT.md: Clarify `replacement-rule` for `create-symlink` only
+    applies if the declared symlink path exists. If it does not exist and
+    cannot be because it would require a non-directory to become a directory,
+    then `replace-rule` cannot be used.
+  * plugin changes: Make single-file Python module easier to provide
+  * debputy: Add `--plugin` parameter to load plugins for most commands.
+  * debputy: Fix bug where some common args were ignored depending on argument
+    order.
+  * dh_installdebputy: New helper to install `debputy` plugins from
+    debhelper packages.
+  * d/control: Have `dh-debputy` provide `dh-sequence-installdebputy`.
+  * dh-sequence-debputy: Restore `dh_installdir` command.  This enables packages
+    to still use the `dh_installdir` helper to work around upstreams that does
+    assumes install directories exist (such as `DEST_DIR`).
+  * debputy: Support d/alternatives files like `dh_installalternatives`.
+  * Provide basic plugin to support d/bash-completion files. The feature is
+    deliberately written as a stand-alone plugin, so it is easier to migrate
+    to the `bash-completion` package later if that is relevant.
+  * GETTING-STARTED-WITH-dh-debputy.md: List `dh_installalternatives` as a
+    replaced command.  It has been replaced for quite a while and the omission
+    in the docs was unintentional.
+  * Provide basic bash-completion plugin and provide migrations for the
+    users of `dh-sequence-bash-completion`.
+  * d/tests/control: Add explicit test dependency on python3-all
+    (Closes: #1056240)
+  * debputy: Provide a `plugin list manifest-variables` subcommand that will
+    list known variables.  Default special-case and token manifest variables
+    are hidden and have to be requested explicitly.
+  * debputy: Provide a `plugin show manifest-variables VAR` subcommand that
+    will show information about a given manifest variable.
+  * Breaking change: Plugins can now provide manifest variables
+  * d/changelog: Bump snapshot version
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 19 Nov 2023 19:00:00 +0100
+
+debputy (0.1.7.8) unstable; urgency=medium
+
+  * Manifest changes:
+    - Breaking change: The `remove` transformation now prunes empty
+      dirs by default.  The previous behaviour can be restored with
+      an explicit `keep-empty-parent-dirs: true`.
+
+  * d/tests/debputy-py.test: Fix bugs in autopkgtest
+  * debputy: Provide new `plugable-manifest-rules` topic for `plugin list`.
+    This subcommand enables the user to get a list of all rules available
+    under `installations` or `packages.{{PACKAGE}}.transformations`, etc.
+    (Note: it was renamed to `pluggable-manifest-rules` in 0.1.22)
+  * debputy: Provide a `plugin show plugable-manifest-rules` command that
+    can provide some details about each rule (such as `install`).
+    (Note: it was renamed to `pluggable-manifest-rules` in 0.1.22)
+  * MANIFEST-FORMAT.md: Clarify some of the "shell"-like examples.
+  * MANIFEST-FORMAT.md: Clarify that "install" (with `as`) behaves like
+    `foo => bar`. Previously, the documentation said `=>` which could also
+    cover the `=> bar` feature from `dh-exec`.  However, that feature is
+    handled by the `installations` itself rather than "install" (with
+    `as`).
+  * d/tests/control: Add superficial test of `debputy` command line
+
+ -- Niels Thykier <niels@thykier.net>  Sat, 28 Oct 2023 17:15:55 +0200
+
+debputy (0.1.7.7) unstable; urgency=medium
+
+  * debputy: Mention `yamllint` in YAML-level parse errors
+  * debputy: Avoid crashing on usr/share/doc/foo symlinks for non-native
+    packages. Thanks to Paul Gevers <elbrus@debian.org> (Closes: debputy#49)
+  * debputy: Fix crash on octal mode being specified as an int.
+    Thanks to Paul Gevers <elbrus@debian.org> (Closes: debputy#54)
+  * debputy: Ensure dh-integration based scratch (temp) dir is used when called
+    from dh_debputy. This ensures that `dh_clean` will always clean up after
+    `debputy` when `debputy` is used with `debhelper`.
+  * debputy: Resolve variables when processing `as` in `install` rules.
+    Thanks to Paul Gevers <elbrus@debian.org>.  It resolves debputy#57, but a
+    regression test has not been added yet.
+  * debputy: Provide contextual error message when using `{{PACKAGE}}` variable
+    when it is not available
+  * debputy: Fix multiple bugs related to installing upstream changelogs
+  * debputy: Unlink empty `conffiles` in the control.tar
+  * d/control: Version the Provides for `dh-sequence-*`
+    Thanks to Paul Gevers <elbrus@debian.org> for the suggestion.
+  * packaging: Add initial autopkgtests
+
+ -- Niels Thykier <niels@thykier.net>  Fri, 27 Oct 2023 16:19:48 +0200
+
+debputy (0.1.7.6) unstable; urgency=medium
+
+  * Manifest changes:
+    - Implement substitution in symlink target.  Thanks to Paul Gevers
+      for reporting the issue. (Closes: debputy#56)
+    - Add `replacement-rule` parameter to `create-symlink`. With the
+      `replacement-rule` parameter, you can control how `debputy`
+       should react to the `path` of a symlink clashing with an
+       existing file system object.  The default behavior remains
+       unchanged.
+
+  * migrate-from-dh:
+    - Merge more `debian/install` rules.  Most install rules from
+      `dh_install` will now be grouped by `dest-dir`. There are a few
+      special-cases, where merging is not applied (`=> usr/bin/foo`)
+      and probably will not be.
+
+  [ Paul Gevers ]
+  * MANIFEST-FORMAT.md: Make the difference between the YAML version and the
+    `debputy` manifest-version more explicit.  (Closes: debputy#51)
+
+  [ Niels Thykier ]
+  * debputy. Improve error handling of some transformation rules for dir vs.
+    non-dir clashes
+  * debputy: Avoid crashing on an attempt to replace a symlink with a non-empty
+    dir. (Closes: debputy#48)
+  * MANIFEST-FORMAT.md: Remove references to aliases that are not applicable
+  * Declarative parser: Support `Literal` values as type. It is basically
+    interpreted as an enum-like input.
+  * debputy: Fix exception on `remove` rules that used globs (Closes: debputy#52)
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 22 Oct 2023 19:08:55 +0200
+
+debputy (0.1.7.5) unstable; urgency=medium
+
+  * migrate-from-dh:
+    - migrate-from-dh: Provide better error message for unresolvable
+      subst vars
+    - migrate-from-dh: Support DEB_VERSION-related substvars.
+      Thanks to Paul Gevers <elbrus@debian.org>. (Closes: debputy#53)
+
+  [ Paul Gevers ]
+  * MANIFEST-FORMAT.md: Multiple improvements to the wording and
+    correction of several examples.
+  * README.md: remove double 'better support'
+  * d/control: same as previous README fix
+
+  [ Niels Thykier ]
+  * GETTING-STARTED-WITH-dh-debputy.md: Correct example
+  * Makefile: Correct name of dh_debputy.1 man page
+  * debputy: Provide better error messages for invalid YAML.
+    Thanks to Paul Gevers <elbrus@debian.org> (Closes: debputy#47)
+  * debputy: Fix crash on relative symlinks when compressing files.
+    Thanks to Paul Gevers <elbrus@debian.org> (Closes: debputy#50)
+
+ -- Niels Thykier <niels@thykier.net>  Fri, 20 Oct 2023 18:12:52 +0200
+
+debputy (0.1.7.4) unstable; urgency=medium
+
+  [ Andres Salomon ]
+  * Fix typo in GETTING-STARTED-WITH-dh-debputy.md
+
+  [ Niels Thykier ]
+  * debputy: Insert explicit shebang line + `set -e` (Closes: debputy#46)
+  * Makefile: Provide and install a man page for dh_debputy
+  * debputy: Use `dpkg-parsechangelog` to determine version during self-hosted
+    clean chroot builds.
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 15 Oct 2023 15:59:28 +0200
+
+debputy (0.1.7.3) unstable; urgency=medium
+
+  * Correct copy-paste mistake in a warning
+  * migrate-from-dh: Avoid internal error with d/package.foo being a directory
+  * Support `open` on symlink for `FSROOverlay` as OS can resolve the symlink.
+
+ -- Niels Thykier <niels@thykier.net>  Tue, 10 Oct 2023 19:59:18 +0200
+
+debputy (0.1.7.2) unstable; urgency=medium
+
+  * Changes related to `migrate-from-dh`:
+    - Merge multiple d/install lines when no dest-dir is provided
+    - Group d/manpages lines by language
+  * debputy: Fix internal error triggered while building src:remind.
+    Thanks to Jochen Sprickerhof <jspricke@debian.org>
+  * debputy: Include document references in some parse errors (when available)
+
+ -- Niels Thykier <niels@thykier.net>  Mon, 09 Oct 2023 18:24:49 +0200
+
+debputy (0.1.7.1) unstable; urgency=medium
+
+  * migrate-from-dh: Correct some messages to provide the proper path name
+  * debputy: Fix internal error caused by some manifest errors
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 08 Oct 2023 18:10:47 +0200
+
+debputy (0.1.7) unstable; urgency=low
+
+  * Upload to unstable.
+
+  * Manifest changes:
+    - Breaking change: `path-metadata` rules never match symlinks.
+      Previously, you could match symlinks when ownership information
+      was changed. However, there is no known case in Debian where this
+      feature would be useful. To keep the logic and documentation simple,
+      symlinks are now no longer matched.
+
+  * Plugin API changes:
+    - Breaking change: Rewrite the API declaring packager provided files to
+      use a full path format rather than dir + basename.
+    - Breaking change: The directory `/usr/share/debputy/debputy/plugins` is
+      now the official plugin directory. Previously, it was not explicitly
+      defined (but ended up being `/usr/share/dh-debputy/plugins`).
+    - It is now possible declare packager provided files in the plugin json
+      file (that is, without needing any python code at all).
+
+  * Changes related to `migrate-from-dh`:
+    - Remove the `systemd` dh addon from the list of supported add-on. The
+      addon implies compat 10 and `debputy` assumes compat 11 at least.
+      Users are better off migrating to compat 11 and then to `debputy`.
+    - When generating an updated manifest, the migration will now verify
+      that the generated manifest can be parsed. If not, `debputy` will
+      raise an internal error promoting the user to file a bug.
+
+  * Parse plugin json via the declarative parser
+  * debputy: Avoid stacktrace if run outside package root
+  * debputy: Support running some subcommands outside of source roots
+  * IMPLEMENTATION-DECISIONS.md: Document some decisions behind plugin integration
+  * debputy: Package builds and `check-manifest` now only loads explicitly
+    requested plugins to ensure deterministic behaviour.  Other commands (notably
+    the `plugin`) still loads all plugins that `debputy` can find.  Plugins are
+    "explicitly requested" when the package has a `Build-Depends` on
+    `debputy-plugin-X` where `X` is the name of the plugin.
+  * MIGRATING-A-DH-PLUGIN.md: Advice against providing Python-based plugins for
+    now as the logistics are not fully prepared.
+  * debputy: Pipe to pager for some subcommands (such as
+    `debputy plugin list ppf`), if `DEBPUTY_PAGER` or `PAGER` is set, or if `less`
+    is available in `PATH`. The `LESS` variable is set to `-FRSXMQ` if not set.
+  * debputy: Show where the plugin is installed when listing plugins
+    (`debputy plugin list`)
+  * debputy: Provide more details in `debputy plugin list ppf`
+  * debputy: Restore ability to build packages with non-root static ownership.
+    There was a regression in a recent release that made `debputy` not realize
+    it would need to account for `(fake)root`.
+  * debputy: Provide better error message when plugin JSON is invalid.
+    Previously, you would just get a stack trace.
+  * Support sub-second mtime in the intermediate manifest
+  * debputy: Preserve `mtime` for compressed files like `gzip` does.
+  * debputy: Reduce the number of `stat`s when performing installations.
+  * debputy: Align changelog trimming closer with `debhelper` to minimize any
+    diffs between a `debhelper` produced deb and a `debputy` produced deb.
+  * debputy: Fix a cache retention issue that caused `Installed-Size` to be
+    wrong some cases.
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 08 Oct 2023 13:38:22 +0200
+
+debputy (0.1.6) experimental; urgency=medium
+
+  * Manifest changes:
+    - Breaking change: Replace `exclude` with `discard` and remove inline
+      `exclude` rule
+    - Breaking change: Rename `exclude` (transformation) to `remove`
+    - Breaking change: Symlink creation is now a transformation rule
+    - Breaking change: Empty directory creation is now a transformation rule
+    - Permit str/list forms of current install rules
+    - Support `install-man` rule similar to `dh_installman`.  Note that
+      `install-man` does *not* automatically fallback to guessing the
+      language from the basename like `dh_installman`. The feature is
+      supported but requires explicit opt-in.
+
+  * Changes related to `migrate-from-dh`:
+    - Fix invalid error message on `${env:FOO}` variables
+    - The migration tool is now more clear on "unsupported" vs. "supported but
+      there is no automatic migration feature".  The former will require an
+      explicit "I know and I am ignoring it" parameter, whereas the latter
+      gets a "manual migration" warning.
+    - Automatic migration from `d/manpages` to the new `install-man` rule.  Be
+      sure to double-check the `language` attribute (of lack thereof).  You may
+      need to add `language: derive-from-basename` in some cases.
+    - Automatic migration to translate `debian/not-installed` into `discard`
+      rules.
+    - The migration tool now detects unsupported dh sequence add-ons used.
+    - The migration tool now detects missing `dh-sequence-debputy` (or the `-zz-`
+      variant) in the Builds-Depends and provides you with a warning.
+
+  * Plugin API changes:
+    - `VirtualPath` now has a new `open` method.
+
+  * d/changelog: Correct a `Closes` to specific it was a gitlab issue
+  * IMPLEMENTATION-DECISIONS.md: New file that document some implementation
+    decisions in a new document.
+  * MANIFEST-FORMAT.md: Tweak some wording and remove an invalid exclude example
+  * MANIFEST-FORMAT.md: Clarify that conditions may partially evaluate rules
+  * Parse transformation rules via declarative parsers.  Same behaviour, just
+    with better error messages.
+  * Set `DPKG_NLS=0` when calling `dpkg-architecture`
+  * FSPath: Support tracking ownership and rewrite mode tracking
+  * Remove internal `show-manifest-rules` command
+  * Avoid crash if two ELF binaries have the same build-id
+  * Support running `dwz` for ELF binaries
+  * GETTING-STARTED-WITH-dh-debputy.md: Improve migration section
+  * Correct python public directory detection.  Previously, if the debug
+    version of the directory was available, only that was checked for
+    python scripts.  Now `debputy` checks both directories when they are
+    both present.
+  * Remove shlibs + symbols migration code it is no longer necessary.
+  * migration: Fix `min` that should have been `max` causing it to use the
+    min dh-compat level rather than the max compat level required by
+    migrations.
+  * migrate-from-dh: Detect unsupported dh-addons and missing debputy B-D
+  * debputy: Clarify that `plugin list --help` will list topics
+  * Remove support for `menutest` and `isinstallable` scripts for now.
+    There is no support for the deb maintscripts. It seems weird to have
+    support for the udeb ones.
+  * Generate the control root in a tempdir to reset state between runs.
+  * shlibs.py: Fix crash when no `shlibs` and `symbols` files were provided
+  * Generate temp names with `__` separating the original basename for making
+    the original basename a little easier to spot.
+  * Fix bug where perl shebang lines were always rewritten
+  * debputy: Provide better contextual error messages
+  * Default most scripts with shebang lines to 755 if no other rule matches it.
+    This applies to any file having /usr/bin, /usr/sbin, /bin, or /sbin
+    in its #!-line, where a more specific rule does not apply.
+    (Closes: debputy#36)
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 01 Oct 2023 22:21:03 +0200
+
+debputy (0.1.5) experimental; urgency=medium
+
+  * New migration features:
+    - Lower the min dh compat to 11 for the simplest cases.  Some cases
+      will require higher compat levels (notably, any arch:any packages bumps
+      the minimum to compat 12).
+
+  * debputy: Breaking change:  Detect missing installation rules for `debian/tmp`
+    similar to `dh_missing`. The `debputy` detects completely directories as
+    possible integration points and provides a bit of context to what kind of
+    path entry the missing file system object is.  The new install-time `exclude`
+    rule can be used to deliberately ignore uninteresting path objects that is
+    this feature detects.
+
+  * Manifest changes:
+    - Breaking change: Make `all-of` and `any-of` consistent (case-wise) with
+      other conditions.
+    - The `into` key on installation rules are now optional for single binary
+      packages.
+    - Fix bug where `dest-dir`, `as` and `when` was ignored for `install` (etc.)
+    - Support symbolic mode for mode attributes in additional to octal modes.
+    - Support `exclude` as an install rule (under `installations`) as an
+      experimental feature.
+    - Support `exclude` as an inline attribute in some `install` rules.
+
+  * Fix error in built-in permission normalization rule that broke directory modes
+    in some cases.
+  * Support main-doc package in install rules and apply_compression
+  * Remove support for debian/udev as it involves `/lib` and `debputy` should not
+    be involved in the `/usr-merge` transition.
+  * util.py: Fix bug in detect_fakeroot that would neuter the check
+  * util.py: Implement an xargs-like interface
+  * highlevel_manifest_parser.py: Prettify the definition reference
+  * highlevel_manifest_parser.py: Detect typos if python3-levenshtein is installed
+  * Remove debug symbols from static libraries (Closes: debputy#32)
+  * Remove remaining code for supporting "install"- and "mtree"-like formats.
+  * Provide a new declarative parser and migrate installation rules to use it.
+  * Replace internal attribute path tracking strings with the new AttributePath
+    class.
+  * Improve handling of installation rules that are disabled by conditionals.
+  * Ensure binNMU changelogs are split out of the main changelog
+    (Closes: debputy#34)
+  * Use declarative parser as a subparser for more parts of the manifest
+  * MANIFEST-FORMAT.md: Installations is now its own top level section
+  * Generate `${t64:Provides}` for the t64 migration (Closes: debputy#37)
+  * Fix invalid root dir for multi-binary packages
+  * MANIFEST-FORMAT.md: Write a conflict rule to apply to `installations` too.
+  * Avoid assertion error when `owning-package` was used without
+    `prior-to-version`.
+  * Support bash-completion via python3-argcomplete. For now, this must be
+    activated manually via `eval "$(register-python-argcomplete debputy)"`.  It is
+    a bit slow due to start up times not being optimized for this case.
+  * Breaking change: Rewrite command line handling to remove special case options
+    (such as `-p`) from the root level.  On the other hand, the new logic supports
+    providing default options on all subparsers, enabling default options such as
+    `--debug` to appear in all subparsers.
+  * Make symbols + shlibs "discoverable" by pretending they are packager provided
+    files. Reuse the detection logic from provider provided files rather than
+    "hand-rolling" a similar logic.
+
+ -- Niels Thykier <niels@thykier.net>  Tue, 12 Sep 2023 20:43:15 +0200
+
+debputy (0.1.4) experimental; urgency=medium
+
+  * debputy.pm: Breaking change: The debputy dh sequence now removes the
+    following debhelper tools from the sequence:
+
+    - dh_installdirs
+    - dh_install
+    - dh_installdocs
+    - dh_installchangelogs
+    - dh_installexamples
+    - dh_installman
+    - dh_installcatalogs (!)
+    - dh_installdebconf (!)
+    - dh_installemacsen (!)
+    - dh_installinfo
+    - dh_installinit (!)
+    - dh_installsysusers
+    - dh_installsystemd (!)
+    - dh_installsystemduser (!)
+    - dh_installmenu (!)
+    - dh_ucf (!)
+    - dh_perl
+    - dh_usrlocal (!)
+    - dh_installwm (!)
+    - dh_strip_nondeterminism (!)
+    - dh_dwz (!)
+    - dh_strip
+    - dh_missing (!)
+
+    At this point, basically any command *after* dh_auto_install (plus
+    dh_installdirs, which runs before dh_auto_install) has been removed.
+    As a consequence, the `debputy.pm` sequence no longer interacts very
+    well with most debhelper sequence addons.  Basically any command
+    relying on content in `debian/<pkg>` will no longer work with
+    `dh-debputy`.
+
+    Commands marked with (!) has no or almost no replacement support.
+    If a package rely on these commands, odds are debputy will be
+    unlikely to support that package.  Other commands will have
+    support for common cases (similar to debhelper's default behavior).
+
+  * debputy.py: Breaking change: Remove support for services, debhelper
+    provided maintscripts and triggers.
+
+  * New migration features:
+    - Auto-migrate `debian/tmpfile` to `debian/tmpfiles`
+    - Auto-migrate `debian/README.debian` to `debian/README.Debian`.
+      (debhelper allowed both, debputy only supports the latter, which
+      is the more common variant).
+    - Auto-migrate `debian/doc-base.<suffix>` to
+      `debian/<pkg>.<suffix>.doc-base`.  Note that debhelper and debputy
+      are not aligned on the naming scheme here. Applying this migration
+      causes debhelper to no longer see the doc-base files.
+    - Auto-migrate common `debian/install`, `debian/docs` and
+      `debian/examples` into the `installations` feature (see
+      "manifest changes" below).  Some (but not 100%) dh-exec support
+      provided as well.
+    - Detect `debian/<foo>` files for unsupported debhelper tools or
+      where no migration has been written yet and warn about their usage
+      affecting the migration.
+    - Migration now works with debhelper compat 13 rather than compat 14
+      in most cases.  Notable exception being packages that have a
+      `debian/pam`, which will still trigger a min compat of 14.
+
+  * manifest changes:
+    - Implement `installations` to replace `dh_install`, `dh_installdocs`
+      and `dh_installexamples`.  Please see the `Installations` section
+      in `MANIFEST-FORMAT.md` for how to use it.   Note that `debputy`
+      installations work differently than debhelper when multiple
+      patterns match the same path.
+
+  * debputy plugin API: Important changes:
+    - Detached paths are now less volatile. Notably, the `path`
+      attribute will now always work for plugins.  The `parent_dir`
+      attribute should still be avoided however. Additionally, the
+      `.lookup` method will now always trigger an exception for a
+      detached path (previously, it would "sometimes" trigger the
+      exception depending on the path being resolved).
+    - Plugins can now choose whether a Packager Provided File (PPF)
+      should have name segments or have architecture specific
+      segments.  Additionally, the plugin can request that
+      `debian/foo` is considered a fallback for all packages for
+      a given file.
+    - The `BinaryPackagePath` type has been renamed to
+      `VirtualPath`.
+
+  * Improve wording in documentation and fix typos various places.
+  * Remove `> /dev/null` for `systemd-tmpfiles`.
+  * Add support for systemd's sysusers file.
+  * Provide standard excludes for commonly unwanted things
+  * Support pruning changelog files. When pruning NEWS, keep only entries listed
+    in the Debian changelog.
+  * Ensure man, info pages, changelog files and Debian.NEWS files are always
+    compressed.  Previously, these would only be compressed if they had a
+    certain size. This change makes `debputy` match `dh_compress` better.
+  * migration: Renames count as successful changes.  Previously, the migration
+    tool would say it could do renames and then claim nothing could be done
+    followed by not doing anything at the end.
+  * Fix bug where mode was used as mtime for symlinks.
+  * manifest/parser: Recognise -dbgsym packages.  The package names
+    are now known and will not trigger an "unknown" package
+    exception when used. However, currently no directives are allowed
+    for dbgsym packages so the net result of specifying them is still
+    an error.
+  * Migrate to the python logging.  Along with a dependency on colorlogs,
+    this means that output will have some color support. This changes means
+    more "info" level messages now have basic colors.
+  * util.py: Fix double quote handling when doing shell escapes.
+  * debputy.py: Improve error reporting a bit.  Notably, previously
+    some exceptions that should have been caught and rendered in a
+    user-friendly way now are as intended.  Additionally, the debputy
+    frontend now catches a common cause of exceptions (`RuntimeError`)
+    and classifies them as "Unexpected exceptions" along with a note
+    recommending filing a bug for debputy.
+  * debputy.py: Hide unstable/internal commands.  Most of the frontend
+    commands are now hidden behind an `internal-command` subcommand.
+    this means that the default help output now only uses 1-2 lines on
+    the internal or unstable subcommands.
+  * debputy.py: Provide a `check-manifest` command to parse the manifest
+    and check for obvious errors without having to build debs.
+  * Do not mandate dpkg archs to be known. Previously, debputy
+    would trigger an error if the manifest in the `arch-matches`
+    condition listed an unknown dpkg arch.  This error has been
+    removed as it is common practice to list new architectures
+    long before dpkg in stable/oldstable knows the architecture.
+  * Tweak the auto-generated maintscripts. Notably, indentation
+    is now two spaces and applied better to avoid weird hanging
+    lines. Additionally, the first line of a snippet is no longer
+    accidentally merged into the condition line, which could
+    cause syntax errors if the fixed line did not have
+    indentation.
+  * Detect and register python byte compilation for public
+    dist-packages dirs and default "package private" dirs
+    similar to `dh_python3`.  This is done because `debputy`
+    cannot rely on `dh_python3` when it is self-hosting.
+    Other `dh_python3` are not ported.
+  * Move all of dh-debputy's files from `usr/share/debputy`
+    to `usr/share/dh-debputy`. In tandem with the previous
+    change, this causes debputy now to properly integrate with
+    the python byte compilation system.
+  * Correct the "inner" snippet order of generated maintscripts.
+    All postrm and prerm snippets are supposed in reverse order
+    and previously some snippets were not reordered correctly.
+  * migrate-from-dh: Reduce the output to make warnings less likely
+    to drown in other output.
+  * migrate-from-dh: Better error reporting on failed executable
+    dh config emulation.
+  * migrate-from-dh: Require an explicit --apply-changes for
+    migrations to performed.
+
+ -- Niels Thykier <niels@thykier.net>  Thu, 24 Aug 2023 19:14:48 +0200
+
+debputy (0.1.3) experimental; urgency=medium
+
+  * debputy.pm: Breaking change: The debputy dh sequence now removes the
+    following debhelper tools from the sequence:
+    - dh_lintian
+    - dh_bugfiles
+    - dh_compress (note: hardlinks are not supported correctly)
+  * Create a basic plugin API infrastructure and move some of the
+    debputy into a plugin. Plugins can currently register packager
+    provided files (`d/pkg.foo -> usr/.../pkg[.conf]`) and detection
+    (and generation) of maintscript snippets, substvars and triggers.
+    However, plugins cannot alter the contents of the data.tar.
+    Additionally, the plugins are not loaded deterministically during
+    builds (unclean chroot can load too many plugins), so they are not
+    ready for prime time yet.
+  * Fixed a bug in debputy's handling of icon-cache generation
+    (dh_icons).
+  * Detect kernel modules under /usr in addition to /lib.
+  * debputy.py: When migrating from dh, detect use of `=>` in
+    debhelper config files and report it as unsupported. The migrator
+    would not generate the correct code for these lines. Currently,
+    none of the debhelper tools where you can use `=>` would be migrated,
+    so this is just future proofing.
+  * debputy.py: Provide a `plugin` subcommand to interact with the
+    plugins.  Currently, it can only list plugins and a bit of the
+    content they provide.
+  * all frontends: Show colorized error and warning messages similar to
+    debhelper.
+  * all frontends: Provide a `--version` that prints the version of
+    debputy.
+  * debputy.py: Detect `/usr/local` paths and abort as they are unhandled.
+    Note that `dh_usrlocal` would normally be run and clean up these
+    directories, so this is only an issue if you bypass `dh_usrlocal` or
+    ask debputy to create content in `/usr/local`.
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 23 Jul 2023 07:52:46 +0000
+
+debputy (0.1.2) experimental; urgency=medium
+
+  * debputy.pm: Breaking change: The debputy dh sequence now removes the
+    following debhelper tools from the sequence:
+    - dh_installudev
+    - dh_installgsettings
+    - dh_makeshlibs
+  * debputy.py: Breaking change: The manifest use `{{X}}` rather than
+    `${X}` for substitution and remove support for environment variables
+    in substitutions.
+  * deb_packer.py: Support most of the dpkg-deb environment variables for
+    compress settings (etc.).  Only known omission is thread count, which
+    despite having a `--threads-max` option, `deb_packer.py` ignores the
+    value in the name of compatibility.
+  * deb_packer.py: Reset the `mtime` of control.tar members according
+    to the SOURCE_DATE_EPOCH rules (clamping).  Previously, the `mtime`
+    was unconditionally reset.  Most control.tar members are
+    generated at runtime, so it only mattered when the control file
+    is not generated.
+  * deb_materialization.py: New internal command for materializing the
+    data.tar part of the deb before assembly (or debugging). The
+    command can also be used to assembling the materialized deb by
+    using dpkg-deb or deb_packer.py (referred to as `debputy`).
+  * debputy.py: Default to using `deb_materialization.py` to
+    materialize the package and then assemble it with dpkg-deb where
+    possible. However, automatically fallback to the internal assembly
+    method when (fake)root is required and `Rules-Requires-Root` is
+    `no`.
+  * debputy.py: When using the `migrate-from-dh` subcommand, use
+    `dh_assistant` to detect override targets that might cause issues
+    with the migration.
+  * debputy.py: Rename `show-manifest-changes` to `show-manifest-rules`
+    and `--show-implicit-changes` to `--show-implicit-rules`.
+  * builtin_manifest_rules.py: Correct permission for two bugreport
+    builtin rules when matching a directory.  Previously, the
+    directories would keep their file system mode. Now they are
+    correctly normalized to 0755 as other directories would have been.
+  * manifest_conditions.py: Fix a bug where the description of build
+    profile conditionals where rendered poorly.
+  * packages.py: Prevent assertion error when user provides a typo'ed
+    package name for `-p`.
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 18 Jun 2023 14:30:41 +0000
+
+debputy (0.1.1) experimental; urgency=medium
+
+  * Initial release.  (Closes: #1029645)
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 05 Feb 2023 18:27:25 +0000

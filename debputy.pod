@@ -1,0 +1,669 @@
+=encoding UTF-8
+
+=head1 NAME
+
+debputy - Manifest style Debian-based package builder
+
+=head1 SYNOPSIS
+
+B<debputy> [S<I<< general options >> >] B<command ...> [S< I<< command options >> >]
+
+B<debputy> B<migrate-from-dh> [B<--apply-changes>] [B<--acceptable-migration-issues=>I<issue>[,I<issue>,...]]
+
+B<debputy> B<check-manifest> [B<--debputy-manifest=>I<path/to/debputy.manifest>]
+
+B<debputy> B<annotate-packaging-files>
+
+B<debputy> B<lint>
+
+B<debputy> B<lsp> B<editor-config> B<NAME>
+
+B<debputy> B<lsp> B<server> [B<--tcp|--ws> [B<--host> I<BIND-ADDRESS>] [B<--port> I<PORT>]]
+
+=head1 DESCRIPTION
+
+The B<debputy> program is a manifest style Debian-based package builder. This man page documents some of the
+user facing commands.
+
+If you are using B<debputy> with a screen reader, consider setting the environment variable
+B<OPTIMIZE_FOR_SCREEN_READER> to 1. This will make many B<debputy> commands remove a lot of
+irrelevant visual rendering. Especially ASCII art style rendering that will just be annoying
+to listen to. Additionally, some output will be described with text to replace the visual
+rendering.
+
+=head2 Commands
+
+=over 4
+
+=item check-manifest
+
+The B<check-manifest> command will cause B<debputy> to parse the manifest and examine it for obvious mistakes.
+
+Note that the command will I<not> catch all mistakes as some problems can only be detected during a build. As
+an example, B<check-manifest> can detect mistyped manifest variables but not typos in path names for
+installation rules.
+
+=item migrate-from-dh
+
+The B<migrate-from-dh> command will attempt to migrate the current package to B<debputy>.
+
+For this command to be successful, it must be run from the root of an unpacked Debian source package and the
+package should be using the B<dh> sequencer.
+
+If you are looking to migrate to B<debputy> from B<dh>, you may want to have a look at the
+B<GETTING-STARTED-WITH-dh-debputy.md> file (in the source root or in F</usr/share/doc/>). That document
+is a how-to guide that as extended advice on migration from B<dh>.
+
+The migration can rerun with newer version of B<debputy> that might provide more features since the previous
+one even inside the same level of adoption. As an example, B<debputy/0.1.21> added support for automatic
+relationship substvars. Re-running the migrator for an already migrated package can be used to detect any
+unnecessary explicit relationship substvars as unnecessary.
+
+The default migration target is based on existing features in the packaging where present. As an example,
+a build-dependency on B<dh-sequence-zz-debputy-rrr> will make the migration tool only run migrators relevant
+for B<dh-sequence-zz-debputy-rrr> (assuming no other markers are present). If the migration cannot identify
+any target markers, it has a built-in default target. The default target will change over time as
+B<debputy> and the migrator mature. The B<--migration-target> option can be used to overrule this automatic
+detection. This can be useful both to expand on the migration level without performing any changes or to
+choose a non default initial migration level.
+
+Generally, the migration tool can take you from "less adoption" towards "more adoption" of B<debputy> but
+not the inverse. As an example, migrating from B<dh-sequence-zz-debputy-rrr> towards B<dh-sequence-zz-debputy>
+is supposed, but the reverse is not. Use of version control is recommended for undoing transition if
+necessary.
+
+If any migrations involve creating a new or changing an existing F<debian/debputy.manifest>, the migration
+tool will first write a draft to F<debian/debputy.manifest.new>. From there, it may be renamed to
+F<debian/debputy.manifest> automatically depending on B<--apply-changes> or B<--no-apply-changes>.
+
+It supports the following options:
+
+=over 4
+
+=item B<--migration-target> I<TARGET-NAME>
+
+Explicitly define how far the migration should go. This will override the detected or built-in default as
+the desired migration target.
+
+See L</INTEGRATION LEVELS> for details about the concrete levels of integration that can be used.
+
+=item B<--acceptable-migration-issues> I<NAME[,...,NAME]>, B<--acceptable-migration-issues=ALL>
+
+The migration may detect unsupported features in the package. Some, but not all, of these can be reduced to
+a warning by passing B<--acceptable-migration-issues> with the name of the issue as provided in the error
+message. The special value B<ALL> in all upper case will cause all issues that can be reduced to a warning
+to be reduced to a warning.
+
+This is only useful to reduce issues to warnings if you are reasonable sure that you can remove the feature
+or convert it to something that B<debputy> supports.
+
+In some cases, it might be helpful to comment out the offending feature and re-run the migration rather
+than using B<--acceptable.migration-issues>. As an example, if a single line of F<debian/install> file
+is problematic, commenting it out will have B<debputy> migrate the rest of the file for you leaving you
+only to manually migrate a single line.
+
+=item B<--apply-changes>, B<--no-act>, B<--no-apply-changes>
+
+These options decide whether the migration tool should perform destructive actions such as overwriting the
+existing B<debian/debputy.manifest> and deleting packaging files that have successfully migrated.
+
+The default is currently to not perform destructive actions as the migration tool does not detect version
+control systems. If support for detecting version control systems is added, this default may change.
+
+Note that the migration may replace B<debian/debputy.manifest.new> regardless of this option as that is its
+output for the updated draft manifest.
+
+The B<--no-act> is an alias of B<--no-apply-changes> to match the name that B<debhelper> commands use.
+
+=back
+
+=item lint
+
+I<< Note: This subcommand needs optional dependencies to work from B<Recommends> or B<Suggests> >>
+
+Run the linting tooling for Debian packaging files.  This will run a linter to check the Debian packaging
+files. This command is useful for CI or for when you cannot use the language server feature. It provides
+the same diagnostics as B<debputy lsp server> would but without requiring an LSP capable editor as intermediate.
+The output is only intended for human consumption.  Machine readable is not a goal at this time.
+
+Note that at the time of writing, the B<debputy.manifest> file is only B<partially> supported. If you
+have F<debian/debputy.manifest>, please also run B<debputy check-manifest> to get more thorough checks
+for that file for now. The B<lint> command will inform you about this issue in the output if a
+F<debian/debputy.manifest> file is detected.
+
+Some relevant options for this subcommand include:
+
+=over 4
+
+=item B<--auto-fix>
+
+If B<debputy> is aware of one "obvious" solution to the issue, just apply it. This will apply the
+changes directly to the file. Use of version control for the Debian packaging is recommended when
+using this option in case you want to undo the result.
+
+=item B<--spellcheck>
+
+Include spellchecking in the linting results. These are by default omitted, since they are slower
+and there are often false-positives.
+
+I<Caveat>: Currently, B<--auto-fix> with B<--spellcheck> will auto-correct all spelling mistakes
+with a single correction available.  This can be suboptimal behaviour in some cases and therefore
+combing these options are not always recommended.
+
+=item B<--linter-exit-code>, B<--no-linter-exit-code>
+
+There is a convention among linter tools to return a non-zero exit code for "severe issues".  The
+B<--linter-exit-code> will enforce this behaviour while the B<--no-linter-exit-code> will disable
+it.
+
+The B<debputy> program will use exit code B<2> for "severe issue" as a "linter exit code" when
+linting based exit codes are active.
+
+Not having a linter based exit code can be useful if you want to run the tool programmatically
+to display the results and you only want the exit code to tell whether there was a problem
+providing the results.
+
+If you rely on the exit code, you are recommended to explicitly pass the relevant variant of the
+flag even if the current default matches your wishes.
+
+=back
+
+A short comparison of B<debputy lint> vs. other tools:
+
+=over 4
+
+=item B<debputy lsp server>
+
+The language server feature from B<debputy lsp server> provides an interactive and online version of the linting
+from B<debputy lint> directly in any LSP capable editor with the proper glue configuration. The LSP
+feature gives you instant gratification, some additional editor-only features and interactive choices of
+available quickfixes.
+
+The "downside" of the B<debputy lsp server> feature is that it requires a LSP capable editor and each editor has
+their own glue configuration. Since the B<debputy> language server is new, almost no editor has built-in
+glue configuration meaning it has a steeper learning curve to get started. Additionally, some times
+you want the checks for CI checks or the current state of the package without having to open each
+file in an editor. Here B<debputy lint> covers the same issues without the need for anything else.
+
+=item B<lintian>
+
+The primary difference between the B<debputy> linter and B<lintian> is that B<lintian> works on "binary"
+artifacts. Even the source checks of B<lintian> checks the packaged version of the source rather than
+the files you are directly working. This means that you have to do a package "build" for lintian to spot
+any changes, which causes slow feedback loops. Additionally, B<debputy lint> can provide feedback regardless
+of whether your package can currently build. Accordingly, you can get help and hints even for problems
+that would prevent a package build. By nature of how B<lintian> works, you can only get hints from lintian
+on matters that does not break the package build.
+
+On the flip side, because B<lintian> is checking the assembled artifacts, it can check for issues that
+are only visible after a package build. Additionally, B<lintian> also checks for issues in the upstream
+sources to some extent. Checking upstream artifacts and the resulting Debian packages are not in scope for
+B<debputy lint> as the B<debputy lint> is intended to be a mirror of the language server diagnostics.
+
+In summary: Use B<debputy lint> (or B<debputy lsp server>) for short feedback loops. Use B<lintian> for
+slower but more thorough checks on resulting packages.
+
+=item B<lintian-brush>
+
+The B<lintian-brush> has a broader scope than B<debputy lint>. If you are a happy B<lintian-brush> user,
+odds are that B<debputy lint> will not do a lot for you. Though, B<debputy lsp server> might still be relevant
+as the language server provides additional editor related features.
+
+=back
+
+=item lsp server
+
+I<< Note: This subcommand needs optional dependencies to work from B<Recommends> or B<Suggests> >>
+
+Start the B<debputy> language server (per B<Language Server Protocol> specification).
+
+Many modern editors can delegate language support to a B<Language Server> or indirectly via other
+features like supporting B<youcompleteme> (which in turn can delegate to a language server). The
+B<debputy> tool provides one for many common packaging formats via the B<lsp server> subcommand for file
+formats such as B<debian/control>, B<debian/changelog> and B<debian/copyright> (DEP-5).
+
+You will often need some editor specific glue configuration to link a given file format or name
+to the language server. The B<debputy lsp editor-config> might provide an example glue snippet for
+your editor. In that glue configuration, you will need to provide a command. Often,
+B<debputy lsp server> will suffice (using the stdio transport). See B<debputy lsp server --help>
+for other integration options such as TCP (B<--tcp>) or websocket (B<--ws>) plus related supporting
+options.
+
+If you need to debug an issue with the language server, the TCP integration (B<--tcp>) can be
+quite helpful. In this mode, you run B<debputy lsp server --tcp> in a terminal before starting your
+editor. This means you have direct and unfiltered access to the B<debputy> command and its output.
+Remember to update your editor to use TCP integration rather than stdio integration (and remember
+to swap back when you are done). Check the B<debputy lsp server --help> if you need a different
+bind address for the language server.
+
+If you can choose the language ID for a given file, you are recommended to use the file name
+relative to the source root (such as B<debian/control>). The service does account for some
+known variations such as B<debian-control> (as used by B<eglot> from B<emacs>) and
+B<debcontrol> (as used by B<vim>). See B<debputy lsp features> for a list of known language IDs
+along with their aliases.
+
+When properly set up, the language server will offer a variety of features such as:
+
+=over 4
+
+=item -
+
+Completion suggestion such as field names or values in deb822 based files.
+
+=item -
+
+Hover documentation for fields in deb822-based files.
+
+=item -
+
+Diagnostics ("linting"). In many cases, B<debputy> will also provide quickfixes for the issues.
+
+This feature is also (partly) available via the B<debputy lint> command. The primary limitation
+in B<debputy lint> is that you cannot interactively choose which quickfix to apply.
+
+=item -
+
+On save actions (currently only "prune trailing whitespace").
+
+=item -
+
+Folding ranges (multi-line comments).
+
+=back
+
+Note these features are subject to the editor supporting them, correct language IDs being
+passed to B<debputy>, etc.
+
+=item lsp editor-config B<EDITOR>
+
+Provide an example configuration glue for using the B<debputy lsp server> with the given editor
+if known.
+
+The snippets are maintained on a basis effort basis for editors without built-in config glue
+for the B<debputy lsp server>. Please file an issue (or a merge request) at
+L<https://salsa.debian.org/debian/debputy> if a snippet needs to be updated, added or removed.
+
+=item lsp features
+
+List in a human readable format details about what language IDs are handled by the
+B<debputy lsp server> along with what features are provided for each file format/language ID.
+
+=item tool-support
+
+These commands are intended for other tools to consume the output. Output is generally JSON by default or
+supported via B<--output-format=json>.
+
+=over 4
+
+=item export-reference-data [DATASET]
+
+The B<export-reference-data> command export reference data. If provided, only the named dataset will be exported.
+Otherwise, all datasets will be exported.
+
+The reference data includes descriptions of the keywords used in the data set, which is helpful to understand the
+data.
+
+=item supports-tool-command <COMMAND>
+
+Tests whether B<debputy> knows about the named command. Returns successfully if known and unsuccessfully if not
+known.
+
+=item annotate-debian-directory
+
+The B<annotate-debian-directory> command will make B<debputy> scan the F<debian/> directory for known
+packaging files and annotate them with information.
+
+Identifying known packaging files is done on a best effort basis and B<debputy> has the following
+sources of information:
+
+=over 4
+
+=item Data from plugins
+
+Any installed B<debputy> plugin can provide data about known packaging files. Most of B<debputy>'s "built-in"
+rules are stored in the B<debputy-documentation> or the B<debhelper-documentation> plugin. These are installed
+in F</usr/share/debputy/debputy/plugins/> by default. If any of the data in there is wrong,
+please file a bug or a bug against the package providing the data (often B<debputy> or B<debhelper>).
+
+If the plugin provides the relevant data, B<debputy> will expose B<install-pattern> and B<install-path>, which
+are best-effort guesses for the file is installed (or where files listed in it will be installed). Please check
+the B<config-features> and B<file-categories> for the file to see when these field are applicable (and which
+case it is).
+
+Note that some files can be matched multiple times. As an example F<debian/changelog> and F<debian/copyright>
+will generally appear once per package, because they are installed in each package.
+
+=item Dynamic data from L<debhelper(7)> (via L<dh_assistant(1)>>)
+
+Additionally, B<debputy> will ask B<dh_assistant> to resolve all relevant helper commands and their relevant
+config snippets. This data will be cross referenced with the plugin provided data where possible. This will
+detect files that B<debputy> (and its plugins) does not know about, but it cannot provide any additional
+information.
+
+This part requires B<debhelper (>= 13.12~)> to work fully. With older versions, the output will include am
+B<issues> denoting that B<dh_assistant> returned non-zero.
+
+When B<dh_assistant list-guessed-dh-config-files> is missing a file, it is typically because the command
+that uses that config file is not introspectable. Typically, that can be fixed by patching the command
+to include a command line a la:
+
+    # INTROSPECTABLE: CONFIG-FILES pkgfile(foo)
+
+Assuming the command uses B<pkgfile($package, "foo")> from L<Debian::Debhelper::Dh_Lib> to look up the
+config file.
+
+Notable case that will never work is F<debian/foo.service> where there is no B<foo> package in
+F<debian/control> but F<debian/rules> calls B<dh_installsystemd --name foo>. This holds equally for
+all debhelper config files and related commands.
+
+=back
+
+=back
+
+=item plugin list [I<TOPIC>]
+
+=item plugin show B<TOPIC> B<identifier>
+
+These commands provides access to features that are provided by plugins (Note: many B<debputy> features are
+plugin provided, so these commands also covers a lot of "built-in" features).
+
+These commands will access features of all plugins B<available> even if the current package will not activate
+all of these plugins. Unless otherwise stated, all output is intended to be human readable rather than machine
+readable. Formatting may change between any version.
+
+Many of the B<list> subcommands also provide a csv format. Note this output is B<not> intended for scripting
+as the output is subject to change - both in form of format availability and content. The csv output is
+intended as an aid to users of screen readers for which csv files are easier to deal with than visually
+rendered tables. If you need a stable format of some particular output, please file a feature request
+at L<https://salsa.debian.org/debian/debputy/-/issues> or via B<reportbug debputy>.
+
+You can use B<debputy plugin list --help> and B<debputy plugin show --help> to see which topics are applicable
+for each subcommand.
+
+Noteworthy topics include:
+
+=over 4
+
+=item plugins
+
+This topic provides a listing of all plugins that B<debputy> is aware of.
+
+This topic can only used with B<plugin list> and not with B<plugin show>.
+
+=item pluggable-manifest-rules (aliases: pmr, p-m-r)
+
+The B<debputy> manifest provides a number of places where the packager can provide a number of different rules
+such as B<install> vs. B<install-doc> vs. B<install-examples> under B<installations:>. These are called
+pluggable manifest rules and this topic provides insights to which rules are available where.
+
+When used with B<list>, B<debputy> will list all pluggable manifest rules available. When used with B<show>,
+a rule name must be provided and B<debputy> will then provide details about the rule. These details include
+attributes available (where applicable) and any reference documentation provided by the plugin.
+
+As an example, here is how you get the details about the install rule:
+
+    debputy plugin show pluggable-manifest-rules install
+
+When a rule name is ambiguous, B<debputy> will ask that you use B<rule-type::rule-name> instead of just B<rule-name>.
+As an example:
+
+    debputy plugin show pluggable-manifest-rules TransformationRule::remove
+    debputy plugin show pluggable-manifest-rules DpkgMaintscriptHelperCommand::remove
+
+Note the type names (such as B<TransformationRule>) are currently an implementation detail and may change in the
+future.
+
+=item packager-provided-files (aliases: ppf, p-p-f)
+
+This topic provides details about all "packager provided files". Packager provided files can be put into F<debian>
+from where B<debputy> will pick them up and install them somewhere in the package. While this command shows all
+possible variants (by their stems), the B<used-packager-provided-files> topic will B<list> real files matched.
+
+When used with B<list>, B<debputy> will list all the packager provided files that B<debputy> knows about. When
+used with B<show>, some additional details will be given.
+
+In a few cases, the packager provided file will be processed first (as an example F<debian/symbols> will be passed
+to B<dpkg-gensymbols> and the processed version will then be installed instead).
+
+=item used-packager-provided-files (aliases: uppf, u-p-p-f)
+
+This topic provides a list of all packager provided files used in this source package. This topic differs from
+B<packager-provided-files> in that it only shows files in actual use whereas the other topic lists all known
+stems.
+
+The listing will potentially include files that B<debputy> could have picked up, but will not do so during a
+package build because the relevant plugin is not explicitly requested (typically via a Build-Depends). These
+cases are placed in a separate table and will be clearly marked.
+
+This topic can only used with B<plugin list> and not with B<plugin show>.
+
+This topic only works when the command is run from the root of an unpacked Debian source package (as
+B<debputy> needs to read F<debian/control> and scan the F<debian/> directory).
+
+=item metadata-detectors
+
+This topic provides a listing of all "metadata detectors". These are plugin provided code snippets that scan the
+final form of the package and add substvars (for B<dpkg-gencontrol>), generate maintscript snippets, or/and
+declare triggers.
+
+This topic can only used with B<plugin list> and not with B<plugin show>.
+
+=item manifest-variables
+
+This topic covers B<plugin provided> manifest variables. The listing will list the common manifest variables by
+default along with their values in source context (if possible). Some of the special case manifest variables are
+hidden by default (use B<debputy plugin list manifest-variables --help> to see the filter options).
+
+When used with B<show VARIABLE>, B<debputy> will list the reference documentation (if provided by the plugin)
+related to the value along with a few other details.
+
+As implied above, this will only show B<plugin provided> variables. Any manifest variables provided directly
+in the manifest is B<not> covered by these commands.
+
+=item automatic-discard-rules
+
+This topic covers automatic discard rules, which are rules that automatically filters out (discards) sources
+from installation rules by default.  The listing will list all the available automatic discard rules. The
+B<show RULE> command will show reference documentation and an example of what the rule reacts to (if these
+have been provided by the plugin).
+
+As an example:
+
+    debputy plugin show automatic-discard-rules la-files
+
+=item type-mappings
+
+This topic cover type mappings that explains how some non-trivial types are interpreted. These covers
+types like B<FileSystemMatchRule> and B<FileSystemMode>, which are used by other features such as
+pluggable manifest rules.
+
+When used with B<show NAME>, any plugin provided documentation and example inputs will be displayed
+for that rule.
+
+=back
+
+=item autopkgtest-test-runner
+
+The B<autopkgtest-test-runner> command is intended to be used by B<autodep8> or from autopkgtests to run the
+tests of plugins in installed mode.
+
+=item internal-command
+
+This is for internal-only usage only.  Any subcommand under B<internal-command> may disappear or change options
+between any release without any warning.
+
+=back
+
+=head1 GENERAL OPTIONS
+
+The following options general options or root level options are available.
+
+=over 4
+
+=item B<-h>, B<--help>
+
+Print usage information and exits.
+
+The information printed depends on which subcommands appear prior to this option.
+
+=item B<--version>
+
+Prints version information and exists.
+
+Cannot be used with subcommands.
+
+=item B<-d>, B<--debug>
+
+Enable debug logging and raw stack traces on errors.
+
+Some warnings become errors as a consequence.
+
+=item B<--no-pager>
+
+Some subcommands will in their default output format pipe it to a pager to give you a more pleasant
+experience if standard out is a terminal. Examples include many of the B<plugin list> commands. This
+option will disable the pager feature.
+
+Most option formats via B<--output-format> will imply B<--no-pager> as well for subcommands that
+support that option.
+
+Note: Assuming the environment has no pager configuration at all, B<debputy> will use L<less(1)>
+with the B<LESS> environment variable set to B<-FRMQSX>. Notable, the B<-F> option will cause B<less> to
+immediately terminate if the output fits on the screen.
+
+=item B<--plugin> I<REQUIRED_PLUGIN>
+
+This option causes I<REQUIRED_PLUGIN> to be loaded as a part of the commands execution if the command needs
+to load plugin data. For commands that load all plugins by default, this option causes the command to fail
+if I<REQUIRED_PLUGIN> cannot be loaded. For commands that are restrictive about which plugins are loaded,
+subcommand will load I<REQUIRED_PLUGIN> in addition other plugins that would normally be loaded.
+
+The I<REQUIRED_PLUGIN> can either be a plugin name or a filename. The B<debputy> program considers parameter
+with a forward slash as a filename. Otherwise, the parameter is interpreted as a plugin name. When given a
+plugin name, B<debputy> will search for the plugin in its plugin search path and load it from there. When
+given a file name, B<debputy> will read that file as a plugin and use the basename minus any B<.json> or
+B<.json.in> extension as the plugin name.
+
+For packages that need a plugin that they provide themselves during their build process, this option can
+be useful to tell B<debputy> about it. For the build itself, usually you want to use
+B<dh_debputy --plugin path/to/plugin.json>. But this option can still be useful for B<debputy check-manifest>
+etc.
+
+The other use-case is to load a plugin not installed into the plugin search directories. Notably, you can
+use this to shadow an existing plugin, which can be useful for debugging and developing your plugin changes.
+
+This option cannot be used with bundled plugins. As an example, both B<--plugin debputy> and
+B<--plugin path/to/a/debputy.json> will result in an error.
+
+=item B<--debputy-manifest> F<FILE>
+
+If the command needs to parse a manifest, have it read F<FILE> instead of B<debian/debputy.manifest>.
+
+Note this is mostly for testing as other features might not work correctly if the manifest is not aligned
+with the current working directory.
+
+=back
+
+=head1 FILES
+
+=over 4
+
+=item F<debian/debputy.manifest>
+
+Please see F</usr/share/doc/dh-debputy/MANIFEST-FORMAT.md.gz> for details on the format.
+
+If you are converting your first package, you may want to read
+F</usr/share/doc/dh-debputy/GETTING-STARTED-WITH-dh-debputy.md.gz> first.
+
+Unlike most debhelper like tools, this file is per source package rather than
+per binary package.  Therefore, you I<cannot> use F<< debian/I<package>.debputy.manifest >>
+to provide a specialized manifest for I<package>. Instead, all the needed parts
+should be written into the manifest itself.
+
+The B<--debputy-manifest> option can be used to have B<debputy> process manifest other
+than F<debian/debputy.manifest>, which may be useful for testing or running
+B<debputy check-manifest> but not much else.
+
+=back
+
+=head1 INTEGRATION LEVELS
+
+The B<debputy> has multiple levels of integrations, which defines how much of the packaging
+that B<debputy> is handling relative to the default B<dh> sequence. The following integrations
+levels are available:
+
+=over 4
+
+=item dh-sequence-zz-debputy-rrr
+
+This integration level replaces the minimal number of commands necessary to provide B<Rules-Requires-Root: no>
+support for B<any> package (even those needing static ownership). The sequence is often compatible with
+other B<debhelper> sequences. To use this B<debputy> integration level, any custom file ownership and
+mode I<should> be migrated to the B<debian/debputy.manifest>. Custom binary package version (B<-v> to
+B<dpkg-gencontrol>) is supported via the manifest.
+
+This migration level corresponds to a B<Build-Depends> on B<dh-sequence-zz-debputy-rrr>.
+
+The following debhelper commands are removed:
+
+=over 4
+
+=item -
+
+dh_fixperms
+
+=item -
+
+dh_shlibdeps
+
+=item -
+
+dh_gencontrol
+
+=item -
+
+dh_md5sums
+
+=item -
+
+dh_builddeb
+
+=back
+
+Note the following B<debputy> features are disabled in this integration mode:
+
+=over 4
+
+=item -
+
+Installation rule (the B<installations> keyword in the manifest). Any installation of content
+that should go resulting B<.deb> or B<.udeb> should happen via B<debhelper>'s mechanisms such
+as B<dh_install>.
+
+=item -
+
+Metadata detectors from plugins. Instead, substvars, maintscripts and triggers are handled and generated
+per B<debhelper> conventions.
+
+=back
+
+=item dh-sequence-zz-debputy
+
+With this integration level, B<debputy> will take over all installation of files into the packages.
+This will replace basically all commands after the B<dh_auto_install> command in the standard B<dh> sequence.
+This also makes the integration level incompatible with many debhelper add-ons, since they expect to run after
+B<dh_auto_install> and assume contents will be materialized into F<< debian/I<package> >>.
+
+This migration level corresponds to a B<Build-Depends> on B<dh-sequence-debputy> or B<dh-sequence-zz-debputy>.
+
+=back
+
+=head1 SEE ALSO
+
+L<dh_debputy(1)>
+
+=head1 AUTHOR
+
+Niels Thykier <niels@thykier.net>
+
+=cut
