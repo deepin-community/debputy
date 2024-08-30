@@ -43,19 +43,22 @@ from ._deb_options_profiles import DebBuildOptionsAndProfiles
 from .architecture_support import DpkgArchitectureBuildProcessValuesTable
 from .filesystem_scan import FSROOverlay
 from .installations import InstallRule, PPFInstallRule
+from .manifest_parser.base_types import BuildEnvironments, BuildEnvironmentDefinition
 from .manifest_parser.exceptions import ManifestParseException
 from .manifest_parser.parser_data import ParserContextData
 from .manifest_parser.util import AttributePath
 from .packager_provided_files import detect_all_packager_provided_files
 from .plugin.api import VirtualPath
+from .plugin.api.feature_set import PluginProvidedFeatureSet
 from .plugin.api.impl_types import (
     TP,
     TTP,
     DispatchingTableParser,
-    OPARSER_MANIFEST_ROOT,
     PackageContextData,
 )
-from .plugin.api.feature_set import PluginProvidedFeatureSet
+from debputy.plugin.api.parser_tables import OPARSER_MANIFEST_ROOT
+from .plugin.api.spec import DebputyIntegrationMode
+from .plugin.debputy.to_be_api_types import BuildRule
 from .yaml import YAMLError, MANIFEST_YAML
 
 try:
@@ -116,6 +119,7 @@ class HighLevelManifestParser(ParserContextData):
         dpkg_arch_query_table: DpkgArchTable,
         build_env: DebBuildOptionsAndProfiles,
         plugin_provided_feature_set: PluginProvidedFeatureSet,
+        debputy_integration_mode: DebputyIntegrationMode,
         *,
         # Available for testing purposes only
         debian_dir: Union[str, VirtualPath] = "./debian",
@@ -129,10 +133,19 @@ class HighLevelManifestParser(ParserContextData):
         self._substitution = substitution
         self._dpkg_architecture_variables = dpkg_architecture_variables
         self._dpkg_arch_query_table = dpkg_arch_query_table
-        self._build_env = build_env
+        self._deb_options_and_profiles = build_env
         self._package_state_stack: List[PackageTransformationDefinition] = []
         self._plugin_provided_feature_set = plugin_provided_feature_set
+        self._debputy_integration_mode = debputy_integration_mode
         self._declared_variables = {}
+        self._used_named_envs = set()
+        self._build_environments: Optional[BuildEnvironments] = BuildEnvironments(
+            {},
+            None,
+        )
+        self._has_set_default_build_environment = False
+        self._read_build_environment = False
+        self._build_rules: Optional[List[BuildRule]] = None
 
         if isinstance(debian_dir, str):
             debian_dir = FSROOverlay.create_root_dir("debian", debian_dir)
@@ -199,10 +212,21 @@ class HighLevelManifestParser(ParserContextData):
         return self._dpkg_arch_query_table
 
     @property
-    def build_env(self) -> DebBuildOptionsAndProfiles:
-        return self._build_env
+    def deb_options_and_profiles(self) -> DebBuildOptionsAndProfiles:
+        return self._deb_options_and_profiles
+
+    def _self_check(self) -> None:
+        unused_envs = (
+            self._build_environments.environments.keys() - self._used_named_envs
+        )
+        if unused_envs:
+            unused_env_names = ", ".join(unused_envs)
+            raise ManifestParseException(
+                f"The following named environments were never referenced: {unused_env_names}"
+            )
 
     def build_manifest(self) -> HighLevelManifest:
+        self._self_check()
         if self._used:
             raise TypeError("build_manifest can only be called once!")
         self._used = True
@@ -211,7 +235,7 @@ class HighLevelManifestParser(ParserContextData):
             if not self.substitution.is_used(var):
                 raise ManifestParseException(
                     f'The variable "{var}" is unused. Either use it or remove it.'
-                    f" The variable was declared at {attribute_path.path}."
+                    f" The variable was declared at {attribute_path.path_key_lc}."
                 )
         if isinstance(self, YAMLManifestParser) and self._mutable_yaml_manifest is None:
             self._mutable_yaml_manifest = MutableYAMLManifest.empty_manifest()
@@ -237,6 +261,8 @@ class HighLevelManifestParser(ParserContextData):
                         ppf_result.reserved_only
                     )
                 self._transform_dpkg_maintscript_helpers_to_snippets()
+        build_environments = self.build_environments()
+        assert build_environments is not None
 
         return HighLevelManifest(
             self.manifest_path,
@@ -248,7 +274,9 @@ class HighLevelManifestParser(ParserContextData):
             self._package_states,
             self._dpkg_architecture_variables,
             self._dpkg_arch_query_table,
-            self._build_env,
+            self._deb_options_and_profiles,
+            build_environments,
+            self._build_rules,
             self._plugin_provided_feature_set,
             self._debian_dir,
         )
@@ -313,6 +341,77 @@ class HighLevelManifestParser(ParserContextData):
     @property
     def is_in_binary_package_state(self) -> bool:
         return bool(self._package_state_stack)
+
+    @property
+    def debputy_integration_mode(self) -> DebputyIntegrationMode:
+        return self._debputy_integration_mode
+
+    @debputy_integration_mode.setter
+    def debputy_integration_mode(self, new_value: DebputyIntegrationMode) -> None:
+        self._debputy_integration_mode = new_value
+
+    def _register_build_environment(
+        self,
+        name: Optional[str],
+        build_environment: BuildEnvironmentDefinition,
+        attribute_path: AttributePath,
+        is_default: bool = False,
+    ) -> None:
+        assert not self._read_build_environment
+
+        # TODO: Reference the paths of the original environments for the error messages where that is relevant.
+        if is_default:
+            if self._has_set_default_build_environment:
+                raise ManifestParseException(
+                    f"There cannot be multiple default environments and"
+                    f" therefore {attribute_path.path} cannot be a default environment"
+                )
+            self._has_set_default_build_environment = True
+            self._build_environments.default_environment = build_environment
+            if name is None:
+                return
+        elif name is None:
+            raise ManifestParseException(
+                f"Useless environment defined at {attribute_path.path}. It is neither the"
+                " default environment nor does it have a name (so no rules can reference it"
+                " explicitly)"
+            )
+
+        if name in self._build_environments.environments:
+            raise ManifestParseException(
+                f'The environment defined at {attribute_path.path} reuse the name "{name}".'
+                " The environment name must be unique."
+            )
+        self._build_environments.environments[name] = build_environment
+
+    def resolve_build_environment(
+        self,
+        name: Optional[str],
+        attribute_path: AttributePath,
+    ) -> BuildEnvironmentDefinition:
+        if name is None:
+            return self.build_environments().default_environment
+        try:
+            env = self.build_environments().environments[name]
+        except KeyError:
+            raise ManifestParseException(
+                f'The environment "{name}" requested at {attribute_path.path} was not'
+                f" defined in the `build-environments`"
+            )
+        else:
+            self._used_named_envs.add(name)
+            return env
+
+    def build_environments(self) -> BuildEnvironments:
+        v = self._build_environments
+        if (
+            not self._read_build_environment
+            and not self._build_environments.environments
+            and self._build_environments.default_environment is None
+        ):
+            self._build_environments.default_environment = BuildEnvironmentDefinition()
+        self._read_build_environment = True
+        return v
 
     def _transform_dpkg_maintscript_helpers_to_snippets(self) -> None:
         package_state = self.current_binary_package_state
@@ -440,17 +539,14 @@ class YAMLManifestParser(HighLevelManifestParser):
         return v
 
     def from_yaml_dict(self, yaml_data: object) -> "HighLevelManifest":
-        attribute_path = AttributePath.root_path()
+        attribute_path = AttributePath.root_path(yaml_data)
         parser_generator = self._plugin_provided_feature_set.manifest_parser_generator
         dispatchable_object_parsers = parser_generator.dispatchable_object_parsers
         manifest_root_parser = dispatchable_object_parsers[OPARSER_MANIFEST_ROOT]
-        parsed_data = cast(
-            "ManifestRootRule",
-            manifest_root_parser.parse_input(
-                yaml_data,
-                attribute_path,
-                parser_context=self,
-            ),
+        parsed_data = manifest_root_parser.parse_input(
+            yaml_data,
+            attribute_path,
+            parser_context=self,
         )
 
         packages_dict: Mapping[str, PackageContextData[Mapping[str, Any]]] = cast(
@@ -496,6 +592,7 @@ class YAMLManifestParser(HighLevelManifestParser):
                     )
                 if service_rules:
                     package_state.requested_service_rules.extend(service_rules)
+        self._build_rules = parsed_data.get("builds")
 
         return self.build_manifest()
 

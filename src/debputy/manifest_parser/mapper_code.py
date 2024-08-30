@@ -4,13 +4,16 @@ from typing import (
     Union,
     List,
     Callable,
+    TYPE_CHECKING,
 )
 
 from debputy.manifest_parser.exceptions import ManifestTypeException
-from debputy.manifest_parser.parser_data import ParserContextData
-from debputy.manifest_parser.util import AttributePath
 from debputy.packages import BinaryPackage
 from debputy.util import assume_not_none
+
+if TYPE_CHECKING:
+    from debputy.manifest_parser.util import AttributePath
+    from debputy.manifest_parser.parser_data import ParserContextData
 
 S = TypeVar("S")
 T = TypeVar("T")
@@ -18,8 +21,8 @@ T = TypeVar("T")
 
 def type_mapper_str2package(
     raw_package_name: str,
-    ap: AttributePath,
-    opc: Optional[ParserContextData],
+    ap: "AttributePath",
+    opc: Optional["ParserContextData"],
 ) -> BinaryPackage:
     pc = assume_not_none(opc)
     if "{{" in raw_package_name:
@@ -50,7 +53,7 @@ def type_mapper_str2package(
 
 def wrap_into_list(
     x: T,
-    _ap: AttributePath,
+    _ap: "AttributePath",
     _pc: Optional["ParserContextData"],
 ) -> List[T]:
     return [x]
@@ -58,18 +61,18 @@ def wrap_into_list(
 
 def normalize_into_list(
     x: Union[T, List[T]],
-    _ap: AttributePath,
+    _ap: "AttributePath",
     _pc: Optional["ParserContextData"],
 ) -> List[T]:
     return x if isinstance(x, list) else [x]
 
 
 def map_each_element(
-    mapper: Callable[[S, AttributePath, Optional["ParserContextData"]], T],
-) -> Callable[[List[S], AttributePath, Optional["ParserContextData"]], List[T]]:
+    mapper: Callable[[S, "AttributePath", Optional["ParserContextData"]], T],
+) -> Callable[[List[S], "AttributePath", Optional["ParserContextData"]], List[T]]:
     def _generated_mapper(
         xs: List[S],
-        ap: AttributePath,
+        ap: "AttributePath",
         pc: Optional["ParserContextData"],
     ) -> List[T]:
         return [mapper(s, ap[i], pc) for i, s in enumerate(xs)]

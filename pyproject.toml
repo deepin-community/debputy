@@ -2,6 +2,7 @@
 branch = true
 source = ["."]
 omit = [
+  "*/debputy/lsp/vendoring/*",
   "*/lib/python*/*",
   "*/dist-packages/*",
   "*/tests/*",
@@ -43,3 +44,6 @@ testpaths = [
     "tests",
     "self-hosting-plugins",
 ]
+
+[tool.mypy]
+mypy_path = "typing-stubs"

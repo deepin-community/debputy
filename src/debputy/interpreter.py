@@ -147,6 +147,10 @@ class DetectedInterpreter(Interpreter):
 
     def replace_shebang_line(self, path: "VirtualPath") -> None:
         new_shebang_line = self.corrected_shebang_line
+        if new_shebang_line is None:
+            raise RuntimeError(
+                "Please do not call replace_shebang_line when fixup_needed returns False"
+            )
         assert new_shebang_line.startswith("#!")
         if not new_shebang_line.endswith("\n"):
             new_shebang_line += "\n"

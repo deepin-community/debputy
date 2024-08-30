@@ -2,67 +2,85 @@ Source: debputy
 Section: devel
 Priority: optional
 Maintainer: Debputy Maintainers <debputy@packages.debian.org>
-Uploaders: Niels Thykier <niels@thykier.net>,
-Build-Depends: debhelper-compat (= 13),
+Uploaders:
+ Niels Thykier <niels@thykier.net>,
+Build-Depends:
+ debhelper-compat (= 13),
 #               man-db <pkg.debputy.ci>,
-               dh-sequence-single-binary,
-               hunspell-en-us <!nocheck>,
-               python3-colored <!pkg.debputy.minimal>,
-               python3-colorlog <!pkg.debputy.minimal>,
-               python3-debian,
-               python3-hunspell <!nocheck>,
-               python3-levenshtein <pkg.debputy.ci>,
-               python3-lsprotocol <!nocheck>,
-               python3-pygls <!nocheck !pkg.debputy.minimal-tests>,
-               python3-pytest <!nocheck>,
-               python3-pytest-cov <pkg.debputy.test-coverage>,
-               python3-ruyaml,
+ dh-sequence-single-binary,
+ hunspell-en-us <!nocheck>,
+ python3-colored <!pkg.debputy.minimal>,
+ python3-colorlog <!pkg.debputy.minimal>,
+ python3-debian,
+ python3-hunspell <!nocheck>,
+ python3-levenshtein <pkg.debputy.ci>,
+ python3-lsprotocol <!nocheck !pkg.debputy.bookworm-backports>,
+ python3-pygls <!nocheck !pkg.debputy.minimal-tests !pkg.debputy.bookworm-backports>,
+ python3-pytest <!nocheck>,
+ python3-pytest-cov <pkg.debputy.test-coverage>,
+ python3-ruyaml | python3-ruamel.yaml,
 #               debputy-plugin-foo,
 # The code was never checked with an older version than 3.11...
-               python3:any (>= 3.11~),
-               strip-nondeterminism <!nocheck>,
+ python3:any (>= 3.11~),
+ strip-nondeterminism <!nocheck>,
 Rules-Requires-Root: no
-Standards-Version: 4.6.2
+X-Style: black
+Standards-Version: 4.7.0
 Homepage: https://salsa.debian.org/debian/debputy
 Vcs-Git: https://salsa.debian.org/debian/debputy.git
 Vcs-Browser: https://salsa.debian.org/debian/debputy
 
 Package: dh-debputy
 Architecture: all
-Depends: debhelper,
-         man-db <!pkg.debputy.minimal>,
+Depends:
+ debhelper,
+ dwz <!pkg.debputy.minimal>,
+ man-db <!pkg.debputy.minimal>,
 # The colors dependencies are not necessary for debputy to work.
 # However, to have coloring work, we need to use Depends because
 # Recommends/Suggests are not resolved for builds and this should
 # "just work" for users.
-         python3-colored <!pkg.debputy.no-color>,
-         python3-colorlog <!pkg.debputy.no-color>,
-         python3-debian,
-         python3-ruyaml,
+ python3-colored <!pkg.debputy.no-color>,
+ python3-colorlog <!pkg.debputy.no-color>,
+ python3-debian,
+ python3-ruyaml | python3-ruamel.yaml,
 # The code was never checked with an older version than 3.11...
-         python3:any (>= 3.11~),
-         strip-nondeterminism,
-Recommends: python3-argcomplete,
-Suggests: hunspell-en-us,
-          python3-hunspell,
-          python3-levenshtein,
-          python3-lsprotocol,
-          python3-pygls,
-Provides: debputy-plugin-gnome,
-          debputy-plugin-numpy3,
-          debputy-plugin-perl-openssl,
-          dh-sequence-debputy (= ${binary:Version}),
-          dh-sequence-installdebputy (= ${binary:Version}),
-          dh-sequence-zz-debputy (= ${binary:Version}),
-          dh-sequence-zz-debputy-rrr (= ${binary:Version}),
+ python3:any (>= 3.11~),
+ strip-nondeterminism,
+Recommends:
+ debhelper (>= 13.16~),
+ python3-argcomplete,
+Suggests:
+ hunspell-en-us,
+ python3-hunspell,
+ python3-junit.xml,
+ python3-levenshtein,
+ python3-lsprotocol,
+ python3-pygls,
+Provides:
+ debputy (= ${binary:Version}),
+ debputy-plugin-gnome,
+ debputy-plugin-grantlee,
+ debputy-plugin-numpy3,
+ debputy-plugin-perl-openssl,
+ dh-sequence-debputy (= ${binary:Version}),
+ dh-sequence-installdebputy (= ${binary:Version}),
+ dh-sequence-zz-debputy (= ${binary:Version}),
+ dh-sequence-zz-debputy-rrr (= ${binary:Version}),
 Multi-Arch: foreign
 Description: Manifest style Debian-based package builder (debhelper integration)
  Package builder that provides a declarative manifest for building Debian-based
  packages.
  .
- This version integrates with the debhelper sequencer dh and will replace
- several of debhelper's tools that are covered by debputy.
- .
  The debputy package builder aims to reduce cognitive load for the packager
  and provide better introspection to packagers, linters and the Debian
  janitor.
+ .
+ This version integrates with the debhelper sequencer dh. Multiple integration
+ modes are possible with dh. The most trivial integration mode is
+ dh-sequence-zz-debputy-rrr, which is a mostly standard dh sequence with very
+ few changes aimed entirely at removing the need for fakeroot when assembling
+ the .deb.
+ .
+ For more information on all integration modes and what they do, please see
+ https://salsa.debian.org/debian/debputy/-/blob/main/INTEGRATION-MODES.md

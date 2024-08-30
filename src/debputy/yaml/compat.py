@@ -10,10 +10,10 @@ __all__ = [
 ]
 
 try:
-    from ruyaml import YAMLError, YAML, Node
+    from ruyaml import YAML, Node
     from ruyaml.comments import LineCol, CommentedBase, CommentedMap, CommentedSeq
-    from ruyaml.error import MarkedYAMLError
+    from ruyaml.error import YAMLError, MarkedYAMLError
 except (ImportError, ModuleNotFoundError):
-    from ruamel.yaml import YAMLError, YAML, Node
-    from ruamel.yaml.comments import LineCol, CommentedBase, CommentedMap, CommentedSeq
-    from ruamel.yaml.error import MarkedYAMLError
+    from ruamel.yaml import YAML, Node  # type: ignore
+    from ruamel.yaml.comments import LineCol, CommentedBase, CommentedMap, CommentedSeq  # type: ignore
+    from ruamel.yaml.error import YAMLError, MarkedYAMLError  # type: ignore

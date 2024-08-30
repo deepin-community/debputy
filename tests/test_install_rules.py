@@ -9,6 +9,7 @@ from debputy.installations import (
     SearchDir,
 )
 from debputy.plugin.api import virtual_path_def
+from debputy.plugin.api.spec import INTEGRATION_MODE_DH_DEBPUTY
 from debputy.plugin.api.test_api import build_virtual_file_system
 
 
@@ -33,6 +34,7 @@ def manifest_parser_pkg_foo(
         dpkg_arch_query,
         no_profiles_or_build_options,
         debputy_plugin_feature_set,
+        "full",
         debian_dir=debian_dir,
     )
 
@@ -58,6 +60,7 @@ def manifest_parser_pkg_foo_w_udeb(
         dpkg_arch_query,
         no_profiles_or_build_options,
         debputy_plugin_feature_set,
+        "full",
         debian_dir=debian_dir,
     )
 
@@ -116,13 +119,14 @@ def test_install_rules(manifest_parser_pkg_foo) -> None:
     all_pkgs = frozenset(manifest.all_packages)
 
     result = manifest.perform_installations(
+        INTEGRATION_MODE_DH_DEBPUTY,
         install_request_context=InstallSearchDirContext(
             [
                 SearchDir(debian_tmp_dir, all_pkgs),
                 SearchDir(debian_source_root_dir, all_pkgs),
             ],
             [debian_tmp_dir],
-        )
+        ),
     )
     assert "foo" in result
     foo_fs_root = result["foo"].fs_root
@@ -205,12 +209,13 @@ def test_multi_dest_install_rules(manifest_parser_pkg_foo) -> None:
     all_pkgs = frozenset(manifest.all_packages)
 
     result = manifest.perform_installations(
+        INTEGRATION_MODE_DH_DEBPUTY,
         install_request_context=InstallSearchDirContext(
             [
                 SearchDir(debian_source_root_dir, all_pkgs),
             ],
             [],
-        )
+        ),
     )
     assert "foo" in result
     foo_fs_root = result["foo"].fs_root
@@ -298,13 +303,14 @@ def test_install_rules_with_glob(manifest_parser_pkg_foo) -> None:
     all_pkgs = frozenset(manifest.all_packages)
 
     result = manifest.perform_installations(
+        INTEGRATION_MODE_DH_DEBPUTY,
         install_request_context=InstallSearchDirContext(
             [
                 SearchDir(debian_tmp_dir, all_pkgs),
                 SearchDir(debian_source_root_dir, all_pkgs),
             ],
             [debian_tmp_dir],
-        )
+        ),
     )
     assert "foo" in result
     foo_fs_root = result["foo"].fs_root
@@ -363,13 +369,14 @@ def test_install_rules_auto_discard_rules_dir(manifest_parser_pkg_foo) -> None:
     all_pkgs = frozenset(manifest.all_packages)
 
     result = manifest.perform_installations(
+        INTEGRATION_MODE_DH_DEBPUTY,
         install_request_context=InstallSearchDirContext(
             [
                 SearchDir(debian_tmp_dir, all_pkgs),
                 SearchDir(debian_source_root_dir, all_pkgs),
             ],
             [debian_tmp_dir],
-        )
+        ),
     )
     assert "foo" in result
     foo_fs_root = result["foo"].fs_root
@@ -422,13 +429,14 @@ def test_install_rules_auto_discard_rules_glob(manifest_parser_pkg_foo) -> None:
     all_pkgs = frozenset(manifest.all_packages)
 
     result = manifest.perform_installations(
+        INTEGRATION_MODE_DH_DEBPUTY,
         install_request_context=InstallSearchDirContext(
             [
                 SearchDir(debian_tmp_dir, all_pkgs),
                 SearchDir(debian_source_root_dir, all_pkgs),
             ],
             [debian_tmp_dir],
-        )
+        ),
     )
     assert "foo" in result
     foo_fs_root = result["foo"].fs_root
@@ -488,13 +496,14 @@ def test_install_rules_auto_discard_rules_overruled_by_explicit_install_rule(
     all_pkgs = frozenset(manifest.all_packages)
 
     result = manifest.perform_installations(
+        INTEGRATION_MODE_DH_DEBPUTY,
         install_request_context=InstallSearchDirContext(
             [
                 SearchDir(debian_tmp_dir, all_pkgs),
                 SearchDir(debian_source_root_dir, all_pkgs),
             ],
             [debian_tmp_dir],
-        )
+        ),
     )
     assert "foo" in result
     foo_fs_root = result["foo"].fs_root
@@ -557,13 +566,14 @@ def test_install_rules_install_as_with_var(manifest_parser_pkg_foo) -> None:
     all_pkgs = frozenset(manifest.all_packages)
 
     result = manifest.perform_installations(
+        INTEGRATION_MODE_DH_DEBPUTY,
         install_request_context=InstallSearchDirContext(
             [
                 SearchDir(debian_tmp_dir, all_pkgs),
                 SearchDir(debian_source_root_dir, all_pkgs),
             ],
             [debian_tmp_dir],
-        )
+        ),
     )
     assert "foo" in result
     foo_fs_root = result["foo"].fs_root
@@ -608,17 +618,18 @@ def test_install_rules_no_matches(manifest_parser_pkg_foo) -> None:
 
     with pytest.raises(NoMatchForInstallPatternError) as e_info:
         manifest.perform_installations(
+            INTEGRATION_MODE_DH_DEBPUTY,
             install_request_context=InstallSearchDirContext(
                 [
                     SearchDir(debian_tmp_dir, all_pkgs),
                     SearchDir(debian_source_root_dir, all_pkgs),
                 ],
                 [debian_tmp_dir],
-            )
+            ),
         )
     expected_msg = (
         "There were no matches for build/private-arch-tool in /nowhere/debian/tmp, /nowhere"
-        " (definition: installations[0].install <Search for: build/private-arch-tool>)."
+        " (definition: installations[0].install [Line 5 column 6])."
         " Match rule: ./build/private-arch-tool (the exact path / no globbing)"
     )
     assert e_info.value.message == expected_msg
@@ -717,6 +728,7 @@ def test_install_rules_per_package_search_dirs(manifest_parser_pkg_foo_w_udeb) -
     all_udeb_pkgs = frozenset({p for p in all_pkgs if p.is_udeb})
 
     result = manifest.perform_installations(
+        INTEGRATION_MODE_DH_DEBPUTY,
         install_request_context=InstallSearchDirContext(
             [
                 SearchDir(debian_tmp_deb_dir, all_deb_pkgs),
@@ -724,7 +736,7 @@ def test_install_rules_per_package_search_dirs(manifest_parser_pkg_foo_w_udeb) -
                 SearchDir(debian_source_root_dir, all_pkgs),
             ],
             [debian_tmp_deb_dir],
-        )
+        ),
     )
     for pkg, ptype in [
         ("foo", "deb"),
@@ -818,12 +830,13 @@ def test_install_rules_multi_into(manifest_parser_pkg_foo_w_udeb) -> None:
     all_pkgs = frozenset(manifest.all_packages)
 
     result = manifest.perform_installations(
+        INTEGRATION_MODE_DH_DEBPUTY,
         install_request_context=InstallSearchDirContext(
             [
                 SearchDir(debian_source_root_dir, all_pkgs),
             ],
             [],
-        )
+        ),
     )
     for pkg in ["foo", "foo-udeb"]:
         assert pkg in result
@@ -937,6 +950,7 @@ def test_auto_install_d_pkg(manifest_parser_pkg_foo_w_udeb) -> None:
     all_pkgs = frozenset(manifest.all_packages)
 
     result = manifest.perform_installations(
+        INTEGRATION_MODE_DH_DEBPUTY,
         install_request_context=InstallSearchDirContext(
             [
                 SearchDir(debian_source_root_dir, all_pkgs),
@@ -946,7 +960,7 @@ def test_auto_install_d_pkg(manifest_parser_pkg_foo_w_udeb) -> None:
                 "foo": debian_foo_dir,
                 "foo-udeb": debian_foo_udeb_dir,
             },
-        )
+        ),
     )
     for pkg in ["foo", "foo-udeb"]:
         assert pkg in result
@@ -1022,12 +1036,13 @@ def test_install_doc_rules_ignore_udeb(manifest_parser_pkg_foo_w_udeb) -> None:
     all_pkgs = frozenset(manifest.all_packages)
 
     result = manifest.perform_installations(
+        INTEGRATION_MODE_DH_DEBPUTY,
         install_request_context=InstallSearchDirContext(
             [
                 SearchDir(debian_source_root_dir, all_pkgs),
             ],
             [],
-        )
+        ),
     )
     assert "foo" in result
     foo_fs_root = result["foo"].fs_root

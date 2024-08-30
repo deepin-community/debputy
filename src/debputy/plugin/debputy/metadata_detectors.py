@@ -520,8 +520,8 @@ def auto_depends_arch_any_solink(
     if not roots:
         return
 
-    for libdir, target in targets:
-        final_path = os.path.join(libdir, target)
+    for libdir_path, target in targets:
+        final_path = os.path.join(libdir_path, target)
         matches = []
         for opkg, ofs_root in roots:
             m = ofs_root.lookup(final_path)

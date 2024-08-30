@@ -1,11 +1,13 @@
 import dataclasses
 import textwrap
-from typing import Tuple, List, Optional, Union
+from typing import Tuple, List, Optional, Union, Sequence
 
 import pytest
 
 from debputy.filesystem_scan import PathDef, build_virtual_fs
-from debputy.highlevel_manifest_parser import YAMLManifestParser
+from debputy.highlevel_manifest_parser import (
+    YAMLManifestParser,
+)
 from debputy.intermediate_manifest import PathType, IntermediateManifest, TarMember
 from debputy.plugin.api import virtual_path_def
 from debputy.plugin.api.test_api import build_virtual_file_system
@@ -33,6 +35,7 @@ def manifest_parser_pkg_foo(
         dpkg_arch_query,
         no_profiles_or_build_options,
         debputy_plugin_feature_set,
+        "full",
         debian_dir=debian_dir,
     )
 
@@ -57,7 +60,7 @@ def _has_fs_path(tm: TarMember) -> bool:
 
 def verify_paths(
     intermediate_manifest: IntermediateManifest,
-    expected_results: List[Tuple[Union[str, PathDef], Expected]],
+    expected_results: Sequence[Tuple[Union[str, PathDef], Expected]],
 ) -> None:
     result = {tm.member_path: tm for tm in intermediate_manifest}
     expected_table = {
@@ -89,7 +92,9 @@ def verify_paths(
             assert tm.member_path in expected_table
 
 
-def test_mtime_clamp_and_builtin_dir_mode(manifest_parser_pkg_foo):
+def test_mtime_clamp_and_builtin_dir_mode(
+    manifest_parser_pkg_foo: YAMLManifestParser,
+) -> None:
     manifest = manifest_parser_pkg_foo.build_manifest()
     claim_mtime_to = 255
     path_defs: List[Tuple[PathDef, Expected]] = [
@@ -127,7 +132,9 @@ def test_mtime_clamp_and_builtin_dir_mode(manifest_parser_pkg_foo):
     verify_paths(intermediate_manifest, path_defs)
 
 
-def test_transformations_create_symlink(manifest_parser_pkg_foo):
+def test_transformations_create_symlink(
+    manifest_parser_pkg_foo: YAMLManifestParser,
+) -> None:
     content = textwrap.dedent(
         """\
     manifest-version: '0.1'
@@ -173,7 +180,9 @@ def test_transformations_create_symlink(manifest_parser_pkg_foo):
     verify_paths(intermediate_manifest, expected_results)
 
 
-def test_transformations_create_symlink_replace_success(manifest_parser_pkg_foo):
+def test_transformations_create_symlink_replace_success(
+    manifest_parser_pkg_foo: YAMLManifestParser,
+) -> None:
     content = textwrap.dedent(
         """\
     manifest-version: '0.1'
@@ -225,8 +234,10 @@ def test_transformations_create_symlink_replace_success(manifest_parser_pkg_foo)
     ],
 )
 def test_transformations_create_symlink_replace_failure(
-    manifest_parser_pkg_foo, replacement_rule, reason
-):
+    manifest_parser_pkg_foo: YAMLManifestParser,
+    replacement_rule: str,
+    reason: str,
+) -> None:
     content = textwrap.dedent(
         f"""\
     manifest-version: '0.1'
@@ -252,14 +263,15 @@ def test_transformations_create_symlink_replace_failure(
         f"Refusing to replace ./usr/share/foo with a symlink; {reason} and the active"
         f" replacement-rule was {replacement_rule}.  You can set the replacement-rule to"
         ' "discard-existing", if you are not interested in the contents of ./usr/share/foo. This error'
-        " was triggered by packages.foo.transformations[0].create-symlink <Search for: usr/share/foo>."
+        # Ideally, this would be reported for line 5.
+        " was triggered by packages.foo.transformations[0].create-symlink [Line 6 column 18]."
     )
     assert e_info.value.args[0] == msg
 
 
 def test_transformations_create_symlink_replace_with_explicit_remove(
-    manifest_parser_pkg_foo,
-):
+    manifest_parser_pkg_foo: YAMLManifestParser,
+) -> None:
     content = textwrap.dedent(
         """\
     manifest-version: '0.1'
@@ -294,8 +306,8 @@ def test_transformations_create_symlink_replace_with_explicit_remove(
 
 
 def test_transformations_create_symlink_replace_with_replacement_rule(
-    manifest_parser_pkg_foo,
-):
+    manifest_parser_pkg_foo: YAMLManifestParser,
+) -> None:
     content = textwrap.dedent(
         """\
     manifest-version: '0.1'
@@ -330,7 +342,9 @@ def test_transformations_create_symlink_replace_with_replacement_rule(
     verify_paths(intermediate_manifest, expected_results)
 
 
-def test_transformations_path_metadata(manifest_parser_pkg_foo):
+def test_transformations_path_metadata(
+    manifest_parser_pkg_foo: YAMLManifestParser,
+) -> None:
     content = textwrap.dedent(
         """\
     manifest-version: '0.1'
@@ -377,7 +391,9 @@ def test_transformations_path_metadata(manifest_parser_pkg_foo):
     verify_paths(intermediate_manifest, expected_results)
 
 
-def test_transformations_directories(manifest_parser_pkg_foo):
+def test_transformations_directories(
+    manifest_parser_pkg_foo: YAMLManifestParser,
+) -> None:
     content = textwrap.dedent(
         """\
     manifest-version: '0.1'
@@ -448,7 +464,9 @@ def test_transformations_directories(manifest_parser_pkg_foo):
     verify_paths(intermediate_manifest, expected_results)
 
 
-def test_transformation_remove(manifest_parser_pkg_foo):
+def test_transformation_remove(
+    manifest_parser_pkg_foo: YAMLManifestParser,
+) -> None:
     content = textwrap.dedent(
         """\
     manifest-version: '0.1'
@@ -484,7 +502,9 @@ def test_transformation_remove(manifest_parser_pkg_foo):
     verify_paths(intermediate_manifest, expected_results)
 
 
-def test_transformation_remove_keep_empty(manifest_parser_pkg_foo):
+def test_transformation_remove_keep_empty(
+    manifest_parser_pkg_foo: YAMLManifestParser,
+) -> None:
     content = textwrap.dedent(
         """\
     manifest-version: '0.1'
@@ -524,7 +544,9 @@ def test_transformation_remove_keep_empty(manifest_parser_pkg_foo):
     verify_paths(intermediate_manifest, expected_results)
 
 
-def test_transformation_remove_glob(manifest_parser_pkg_foo):
+def test_transformation_remove_glob(
+    manifest_parser_pkg_foo: YAMLManifestParser,
+) -> None:
     content = textwrap.dedent(
         """\
     manifest-version: '0.1'
@@ -576,7 +598,9 @@ def test_transformation_remove_glob(manifest_parser_pkg_foo):
     verify_paths(intermediate_manifest, expected_results)
 
 
-def test_transformation_remove_no_match(manifest_parser_pkg_foo):
+def test_transformation_remove_no_match(
+    manifest_parser_pkg_foo: YAMLManifestParser,
+) -> None:
     content = textwrap.dedent(
         """\
     manifest-version: '0.1'
@@ -607,13 +631,15 @@ def test_transformation_remove_no_match(manifest_parser_pkg_foo):
         manifest.apply_to_binary_staging_directory("foo", fs_root, claim_mtime_to)
     expected = (
         'The match rule "./some/non-existing-path" in transformation'
-        ' "packages.foo.transformations[0].remove <Search for: some/non-existing-path>" did not match any paths. Either'
+        ' "packages.foo.transformations[0].remove [Line 5 column 18]" did not match any paths. Either'
         " the definition is redundant (and can be omitted) or the match rule is incorrect."
     )
     assert expected == e_info.value.args[0]
 
 
-def test_transformation_move_basic(manifest_parser_pkg_foo):
+def test_transformation_move_basic(
+    manifest_parser_pkg_foo: YAMLManifestParser,
+) -> None:
     content = textwrap.dedent(
         """\
     manifest-version: '0.1'
@@ -677,7 +703,9 @@ def test_transformation_move_basic(manifest_parser_pkg_foo):
     verify_paths(intermediate_manifest, expected_results)
 
 
-def test_transformation_move_no_match(manifest_parser_pkg_foo):
+def test_transformation_move_no_match(
+    manifest_parser_pkg_foo: YAMLManifestParser,
+) -> None:
     content = textwrap.dedent(
         """\
     manifest-version: '0.1'
@@ -710,13 +738,15 @@ def test_transformation_move_no_match(manifest_parser_pkg_foo):
         manifest.apply_to_binary_staging_directory("foo", fs_root, claim_mtime_to)
     expected = (
         'The match rule "./some/non-existing-path" in transformation'
-        ' "packages.foo.transformations[0].move <Search for: some/non-existing-path>" did not match any paths. Either'
+        ' "packages.foo.transformations[0].move [Line 6 column 12]" did not match any paths. Either'
         " the definition is redundant (and can be omitted) or the match rule is incorrect."
     )
     assert expected == e_info.value.args[0]
 
 
-def test_builtin_mode_normalization(manifest_parser_pkg_foo):
+def test_builtin_mode_normalization_shell_scripts(
+    manifest_parser_pkg_foo: YAMLManifestParser,
+) -> None:
     manifest = manifest_parser_pkg_foo.build_manifest()
     claim_mtime_to = 255
     sh_script_content = "#!/bin/sh"
@@ -758,6 +788,56 @@ def test_builtin_mode_normalization(manifest_parser_pkg_foo):
         ("some/dir/script.sh", Expected(mode=0o755, mtime=10)),
         ("some/dir/script.py", Expected(mode=0o755, mtime=10)),
         ("some/dir/non-script-file", Expected(mode=0o644, mtime=10)),
+    ]
+    assert [p.name for p in manifest.all_packages] == ["foo"]
+
+    intermediate_manifest = manifest.apply_to_binary_staging_directory(
+        "foo", fs_root, claim_mtime_to
+    )
+
+    print(intermediate_manifest)
+
+    verify_paths(intermediate_manifest, expected_results)
+
+
+def test_builtin_mode_normalization(
+    manifest_parser_pkg_foo: YAMLManifestParser,
+) -> None:
+    manifest = manifest_parser_pkg_foo.build_manifest()
+    claim_mtime_to = 255
+
+    paths = [
+        virtual_path_def("usr/", mode=0o755, mtime=10, fs_path="/nowhere/usr"),
+        virtual_path_def(
+            "usr/share/", mode=0o755, mtime=10, fs_path="/nowhere/usr/share"
+        ),
+        virtual_path_def(
+            "usr/share/perl5/", mode=0o755, mtime=10, fs_path="/nowhere/usr/share/perl5"
+        ),
+        virtual_path_def(
+            "usr/share/perl5/Foo.pm",
+            # #1076346
+            mode=0o444,
+            mtime=10,
+            fs_path="/nowhere/Foo.pm",
+        ),
+        virtual_path_def(
+            "usr/share/perl5/Bar.pm",
+            mode=0o755,
+            mtime=10,
+            fs_path="/nowhere/Bar.pm",
+        ),
+    ]
+
+    fs_root = build_virtual_fs(paths, read_write_fs=True)
+    assert [p.name for p in manifest.all_packages] == ["foo"]
+
+    expected_results = [
+        ("usr/", Expected(mode=0o755, mtime=10)),
+        ("usr/share/", Expected(mode=0o755, mtime=10)),
+        ("usr/share/perl5/", Expected(mode=0o755, mtime=10)),
+        ("usr/share/perl5/Bar.pm", Expected(mode=0o644, mtime=10)),
+        ("usr/share/perl5/Foo.pm", Expected(mode=0o644, mtime=10)),
     ]
     assert [p.name for p in manifest.all_packages] == ["foo"]
 

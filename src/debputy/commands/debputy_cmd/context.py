@@ -1,6 +1,7 @@
 import argparse
 import dataclasses
 import errno
+import logging
 import os
 from typing import (
     Optional,
@@ -14,6 +15,7 @@ from typing import (
     Callable,
     Dict,
     TYPE_CHECKING,
+    Literal,
 )
 
 from debian.debian_support import DpkgArchTable
@@ -23,10 +25,12 @@ from debputy.architecture_support import (
     DpkgArchitectureBuildProcessValuesTable,
     dpkg_architecture_table,
 )
+from debputy.dh.dh_assistant import read_dh_addon_sequences
 from debputy.exceptions import DebputyRuntimeError
 from debputy.filesystem_scan import FSROOverlay
 from debputy.highlevel_manifest import HighLevelManifest
 from debputy.highlevel_manifest_parser import YAMLManifestParser
+from debputy.integration_detection import determine_debputy_integration_mode
 from debputy.packages import (
     SourcePackage,
     BinaryPackage,
@@ -35,13 +39,22 @@ from debputy.packages import (
 from debputy.plugin.api import VirtualPath
 from debputy.plugin.api.impl import load_plugin_features
 from debputy.plugin.api.feature_set import PluginProvidedFeatureSet
+from debputy.plugin.api.spec import DebputyIntegrationMode
 from debputy.substitution import (
     Substitution,
     VariableContext,
     SubstitutionImpl,
     NULL_SUBSTITUTION,
 )
-from debputy.util import _error, PKGNAME_REGEX, resolve_source_date_epoch, setup_logging
+from debputy.util import (
+    _error,
+    PKGNAME_REGEX,
+    resolve_source_date_epoch,
+    setup_logging,
+    PRINT_COMMAND,
+    change_log_level,
+    _warn,
+)
 
 if TYPE_CHECKING:
     from argparse import _SubParsersAction
@@ -77,6 +90,22 @@ class Command:
     requested_plugins_only: bool = False
 
 
+def _host_dpo_to_dbo(opt_and_profiles: "DebBuildOptionsAndProfiles", v: str) -> bool:
+
+    if (
+        v in opt_and_profiles.deb_build_profiles
+        and v not in opt_and_profiles.deb_build_options
+    ):
+        val = os.environ.get("DEB_BUILD_OPTIONS", "") + " " + v
+        _warn(
+            f'Copying "{v}" into DEB_BUILD_OPTIONS: It was in DEB_BUILD_PROFILES but not in DEB_BUILD_OPTIONS'
+        )
+        os.environ["DEB_BUILD_OPTIONS"] = val.lstrip()
+        # Note: It will not be immediately visible since `DebBuildOptionsAndProfiles` caches the result
+        return True
+    return False
+
+
 class CommandContext:
     def __init__(
         self,
@@ -99,12 +128,26 @@ class CommandContext:
         self._requested_plugins: Optional[Sequence[str]] = None
         self._plugins_loaded = False
         self._dctrl_parser: Optional[DctrlParser] = None
+        self.debputy_integration_mode: Optional[DebputyIntegrationMode] = None
         self._dctrl_data: Optional[
             Tuple[
                 "SourcePackage",
                 Mapping[str, "BinaryPackage"],
             ]
         ] = None
+        self._package_set: Literal["both", "arch", "indep"] = "both"
+
+    @property
+    def package_set(self) -> Literal["both", "arch", "indep"]:
+        return self._package_set
+
+    @package_set.setter
+    def package_set(self, new_value: Literal["both", "arch", "indep"]) -> None:
+        if self._dctrl_parser is not None:
+            raise TypeError(
+                "package_set cannot be redefined once the debian/control parser has been initialized"
+            )
+        self._package_set = new_value
 
     @property
     def debian_dir(self) -> VirtualPath:
@@ -127,12 +170,21 @@ class CommandContext:
             if hasattr(self.parsed_args, "packages"):
                 packages = self.parsed_args.packages
 
+            instance = DebBuildOptionsAndProfiles(environ=os.environ)
+
+            dirty = _host_dpo_to_dbo(instance, "nodoc")
+            dirty = _host_dpo_to_dbo(instance, "nocheck") or dirty
+
+            if dirty:
+                instance = DebBuildOptionsAndProfiles(environ=os.environ)
+
             parser = DctrlParser(
                 packages,  # -p/--package
                 set(),  # -N/--no-package
-                False,  # -i
-                False,  # -a
-                build_env=DebBuildOptionsAndProfiles.instance(),
+                # binary-indep and binary-indep (dpkg BuildDriver integration only)
+                self._package_set == "indep",
+                self._package_set == "arch",
+                deb_options_and_profiles=instance,
                 dpkg_architecture_variables=dpkg_architecture_table(),
                 dpkg_arch_query_table=DpkgArchTable.load_arch_table(),
             )
@@ -147,6 +199,9 @@ class CommandContext:
         _, binary_package_table = self._parse_dctrl()
         return binary_package_table
 
+    def dpkg_architecture_variables(self) -> DpkgArchitectureBuildProcessValuesTable:
+        return self.dctrl_parser.dpkg_architecture_variables
+
     def requested_plugins(self) -> Sequence[str]:
         if self._requested_plugins is None:
             self._requested_plugins = self._resolve_requested_plugins()
@@ -157,7 +212,7 @@ class CommandContext:
 
     @property
     def deb_build_options_and_profiles(self) -> "DebBuildOptionsAndProfiles":
-        return self.dctrl_parser.build_env
+        return self.dctrl_parser.deb_options_and_profiles
 
     @property
     def deb_build_options(self) -> Mapping[str, Optional[str]]:
@@ -262,7 +317,7 @@ class CommandContext:
                         os.path.join(self.debian_dir.fs_path, "control"),
                     )
                 with debian_control.open() as fd:
-                    source_package, binary_packages = (
+                    _, source_package, binary_packages = (
                         self.dctrl_parser.parse_source_debian_control(
                             fd,
                         )
@@ -287,6 +342,37 @@ class CommandContext:
         debian_control = self.debian_dir.get("control")
         return debian_control is not None
 
+    def resolve_integration_mode(
+        self,
+        require_integration: bool = True,
+    ) -> DebputyIntegrationMode:
+        integration_mode = self.debputy_integration_mode
+        if integration_mode is None:
+            r = read_dh_addon_sequences(self.debian_dir)
+            bd_sequences, dr_sequences, _ = r
+            all_sequences = bd_sequences | dr_sequences
+            integration_mode = determine_debputy_integration_mode(
+                self.source_package().fields,
+                all_sequences,
+            )
+            if integration_mode is None and not require_integration:
+                _error(
+                    "Cannot resolve the integration mode expected for this package. Is this package using `debputy`?"
+                )
+            self.debputy_integration_mode = integration_mode
+        return integration_mode
+
+    def set_log_level_for_build_subcommand(self) -> Optional[int]:
+        parsed_args = self.parsed_args
+        log_level: Optional[int] = None
+        if os.environ.get("DH_VERBOSE", "") != "":
+            log_level = PRINT_COMMAND
+        if parsed_args.debug_mode or os.environ.get("DEBPUTY_DEBUG", "") != "":
+            log_level = logging.DEBUG
+        if log_level is not None:
+            change_log_level(log_level)
+        return log_level
+
     def manifest_parser(
         self,
         *,
@@ -308,8 +394,9 @@ class CommandContext:
             substitution,
             dctrl_parser.dpkg_architecture_variables,
             dctrl_parser.dpkg_arch_query_table,
-            dctrl_parser.build_env,
+            dctrl_parser.deb_options_and_profiles,
             self.load_plugins(),
+            self.resolve_integration_mode(),
             debian_dir=self.debian_dir,
         )
 
@@ -385,6 +472,7 @@ class GenericSubCommand(SubcommandBase):
         "_require_substitution",
         "_requested_plugins_only",
         "_log_only_to_stderr",
+        "_default_log_level",
     )
 
     def __init__(
@@ -398,6 +486,7 @@ class GenericSubCommand(SubcommandBase):
         require_substitution: bool = True,
         requested_plugins_only: bool = False,
         log_only_to_stderr: bool = False,
+        default_log_level: Union[int, Callable[[CommandContext], int]] = logging.INFO,
     ) -> None:
         super().__init__(name, aliases=aliases, help_description=help_description)
         self._handler = handler
@@ -405,6 +494,7 @@ class GenericSubCommand(SubcommandBase):
         self._require_substitution = require_substitution
         self._requested_plugins_only = requested_plugins_only
         self._log_only_to_stderr = log_only_to_stderr
+        self._default_log_level = default_log_level
 
     def configure_handler(
         self,
@@ -428,6 +518,18 @@ class GenericSubCommand(SubcommandBase):
         )
         if self._log_only_to_stderr:
             setup_logging(reconfigure_logging=True, log_only_to_stderr=True)
+
+        default_log_level = self._default_log_level
+        if isinstance(default_log_level, int):
+            level = default_log_level
+        else:
+            assert callable(default_log_level)
+            level = default_log_level(context)
+        change_log_level(level)
+        if level > logging.DEBUG and (
+            context.parsed_args.debug_mode or os.environ.get("DEBPUTY_DEBUG", "") != ""
+        ):
+            change_log_level(logging.DEBUG)
         return self._handler(context)
 
 
@@ -469,6 +571,7 @@ class DispatchingCommandMixin(CommandBase):
         require_substitution: bool = True,
         requested_plugins_only: bool = False,
         log_only_to_stderr: bool = False,
+        default_log_level: Union[int, Callable[[CommandContext], int]] = logging.INFO,
     ) -> Callable[[CommandHandler], GenericSubCommand]:
         if isinstance(name, str):
             cmd_name = name
@@ -495,6 +598,7 @@ class DispatchingCommandMixin(CommandBase):
                 require_substitution=require_substitution,
                 requested_plugins_only=requested_plugins_only,
                 log_only_to_stderr=log_only_to_stderr,
+                default_log_level=default_log_level,
             )
             self.add_subcommand(subcommand)
             if argparser is not None:

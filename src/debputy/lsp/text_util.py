@@ -1,53 +1,34 @@
-from typing import List, Optional, Sequence, Union, Iterable
+from typing import List, Optional, Sequence, Union, Iterable, TYPE_CHECKING
 
-from lsprotocol.types import (
+from debputy.lsprotocol.types import (
     TextEdit,
     Position,
     Range,
     WillSaveTextDocumentParams,
+    DocumentFormattingParams,
 )
 
 from debputy.linting.lint_util import LinterPositionCodec
 
 try:
-    from debian._deb822_repro.locatable import Position as TEPosition, Range as TERange
+    from debputy.lsp.vendoring._deb822_repro.locatable import (
+        Position as TEPosition,
+        Range as TERange,
+    )
+    from debputy.lsp.debputy_ls import DebputyLanguageServer
 except ImportError:
     pass
 
 try:
-    from pygls.workspace import LanguageServer, TextDocument, PositionCodec
+    from pygls.server import LanguageServer
+    from pygls.workspace import TextDocument, PositionCodec
+except ImportError:
+    pass
 
+if TYPE_CHECKING:
     LintCapablePositionCodec = Union[LinterPositionCodec, PositionCodec]
-except ImportError:
-    LintCapablePositionCodec = LinterPositionCodec
-
-
-try:
-    from Levenshtein import distance
-except ImportError:
-
-    def detect_possible_typo(
-        provided_value: str,
-        known_values: Iterable[str],
-    ) -> Sequence[str]:
-        return tuple()
-
 else:
-
-    def detect_possible_typo(
-        provided_value: str,
-        known_values: Iterable[str],
-    ) -> Sequence[str]:
-        k_len = len(provided_value)
-        candidates = []
-        for known_value in known_values:
-            if abs(k_len - len(known_value)) > 2:
-                continue
-            d = distance(provided_value, known_value)
-            if d > 2:
-                continue
-            candidates.append(known_value)
-        return candidates
+    LintCapablePositionCodec = LinterPositionCodec
 
 
 def normalize_dctrl_field_name(f: str) -> str:
@@ -66,18 +47,24 @@ def normalize_dctrl_field_name(f: str) -> str:
 
 def on_save_trim_end_of_line_whitespace(
     ls: "LanguageServer",
-    params: WillSaveTextDocumentParams,
+    params: Union[WillSaveTextDocumentParams, DocumentFormattingParams],
 ) -> Optional[Sequence[TextEdit]]:
     doc = ls.workspace.get_text_document(params.text_document.uri)
-    return trim_end_of_line_whitespace(doc, doc.lines)
+    return trim_end_of_line_whitespace(doc.position_codec, doc.lines)
 
 
 def trim_end_of_line_whitespace(
-    doc: "TextDocument",
+    position_codec: "LintCapablePositionCodec",
     lines: List[str],
+    *,
+    line_range: Optional[Iterable[int]] = None,
+    line_relative_line_no: int = 0,
 ) -> Optional[Sequence[TextEdit]]:
     edits = []
-    for line_no, orig_line in enumerate(lines):
+    if line_range is None:
+        line_range = range(0, len(lines))
+    for line_no in line_range:
+        orig_line = lines[line_no]
         orig_len = len(orig_line)
         if orig_line.endswith("\n"):
             orig_len -= 1
@@ -85,16 +72,20 @@ def trim_end_of_line_whitespace(
         if stripped_len == orig_len:
             continue
 
-        edit_range = doc.position_codec.range_to_client_units(
+        stripped_len_client_off = position_codec.client_num_units(
+            orig_line[:stripped_len]
+        )
+        orig_len_client_off = position_codec.client_num_units(orig_line[:orig_len])
+        edit_range = position_codec.range_to_client_units(
             lines,
             Range(
                 Position(
-                    line_no,
-                    stripped_len,
+                    line_no + line_relative_line_no,
+                    stripped_len_client_off,
                 ),
                 Position(
-                    line_no,
-                    orig_len,
+                    line_no + line_relative_line_no,
+                    orig_len_client_off,
                 ),
             ),
         )
@@ -120,3 +111,46 @@ def te_range_to_lsp(te_range: "TERange") -> Range:
         te_position_to_lsp(te_range.start_pos),
         te_position_to_lsp(te_range.end_pos),
     )
+
+
+class SemanticTokensState:
+    __slots__ = ("ls", "doc", "lines", "tokens", "_previous_line", "_previous_col")
+
+    def __init__(
+        self,
+        ls: "DebputyLanguageServer",
+        doc: "TextDocument",
+        lines: List[str],
+        tokens: List[int],
+    ) -> None:
+        self.ls = ls
+        self.doc = doc
+        self.lines = lines
+        self.tokens = tokens
+        self._previous_line = 0
+        self._previous_col = 0
+
+    def emit_token(
+        self,
+        start_pos: Position,
+        len_client_units: int,
+        token_code: int,
+        *,
+        token_modifiers: int = 0,
+    ) -> None:
+        line_delta = start_pos.line - self._previous_line
+        self._previous_line = start_pos.line
+        previous_col = self._previous_col
+
+        if line_delta:
+            previous_col = 0
+
+        column_delta = start_pos.character - previous_col
+        self._previous_col = start_pos.character
+
+        tokens = self.tokens
+        tokens.append(line_delta)  # Line delta
+        tokens.append(column_delta)  # Token column delta
+        tokens.append(len_client_units)  # Token length
+        tokens.append(token_code)
+        tokens.append(token_modifiers)

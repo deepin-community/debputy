@@ -1,5 +1,6 @@
 import stat
 import os
+from typing import Iterator
 
 import pytest
 
@@ -13,7 +14,7 @@ STUB_CMD = os.path.join(os.path.dirname(__file__), "perl-ssl_test.sh")
 
 
 @pytest.fixture(scope="session")
-def perl_ssl_stub_cmd() -> None:
+def perl_ssl_stub_cmd() -> Iterator[None]:
     os.environ["_PERL_SSL_DEFAULTS_TEST_PATH"] = STUB_CMD
     mode = stat.S_IMODE(os.stat(STUB_CMD).st_mode)
     if (mode & 0o500) != 0o500:

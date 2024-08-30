@@ -2,22 +2,17 @@ import textwrap
 
 import pytest
 
+from debputy.lsp.debputy_ls import DebputyLanguageServer
 from lsp_tests.lsp_tutil import put_doc_with_cursor
+
+from debputy.lsprotocol.types import (
+    TextDocumentIdentifier,
+    HoverParams,
+    MarkupContent,
+)
 
 try:
     from pygls.server import LanguageServer
-    from lsprotocol.types import (
-        InitializeParams,
-        ClientCapabilities,
-        GeneralClientCapabilities,
-        PositionEncodingKind,
-        TextDocumentItem,
-        Position,
-        CompletionParams,
-        TextDocumentIdentifier,
-        HoverParams,
-        MarkupContent,
-    )
     from debputy.lsp.lsp_debian_debputy_manifest import debputy_manifest_hover
 
     HAS_PYGLS = True
@@ -25,7 +20,7 @@ except ImportError:
     HAS_PYGLS = False
 
 
-def test_basic_debputy_hover_tlk(ls: "LanguageServer") -> None:
+def test_basic_debputy_hover_tlk(ls: "DebputyLanguageServer") -> None:
     debputy_manifest_uri = "file:///nowhere/debian/debputy.manifest"
     cursor_pos = put_doc_with_cursor(
         ls,
@@ -52,7 +47,7 @@ def test_basic_debputy_hover_tlk(ls: "LanguageServer") -> None:
     assert hover_doc.contents.value.startswith("Installations")
 
 
-def test_basic_debputy_hover_install_docs_key(ls: "LanguageServer") -> None:
+def test_basic_debputy_hover_install_docs_key(ls: "DebputyLanguageServer") -> None:
     debputy_manifest_uri = "file:///nowhere/debian/debputy.manifest"
     cursor_pos = put_doc_with_cursor(
         ls,
@@ -79,7 +74,7 @@ def test_basic_debputy_hover_install_docs_key(ls: "LanguageServer") -> None:
     assert hover_doc.contents.value.startswith("Install documentation (`install-docs`)")
 
 
-def test_basic_debputy_hover_install_docs_sources(ls: "LanguageServer") -> None:
+def test_basic_debputy_hover_install_docs_sources(ls: "DebputyLanguageServer") -> None:
     debputy_manifest_uri = "file:///nowhere/debian/debputy.manifest"
     cursor_pos = put_doc_with_cursor(
         ls,
@@ -106,7 +101,7 @@ def test_basic_debputy_hover_install_docs_sources(ls: "LanguageServer") -> None:
     assert hover_doc.contents.value.startswith("# Attribute `sources`")
 
 
-def test_basic_debputy_hover_install_docs_when(ls: "LanguageServer") -> None:
+def test_basic_debputy_hover_install_docs_when(ls: "DebputyLanguageServer") -> None:
     debputy_manifest_uri = "file:///nowhere/debian/debputy.manifest"
     cursor_pos = put_doc_with_cursor(
         ls,
@@ -134,7 +129,7 @@ def test_basic_debputy_hover_install_docs_when(ls: "LanguageServer") -> None:
     assert hover_doc.contents.value.startswith("# Attribute `when`")
 
 
-def test_basic_debputy_hover_install_docs_str_cond(ls: "LanguageServer") -> None:
+def test_basic_debputy_hover_install_docs_str_cond(ls: "DebputyLanguageServer") -> None:
     debputy_manifest_uri = "file:///nowhere/debian/debputy.manifest"
     cursor_pos = put_doc_with_cursor(
         ls,
@@ -165,7 +160,7 @@ def test_basic_debputy_hover_install_docs_str_cond(ls: "LanguageServer") -> None
 
 
 def test_basic_debputy_hover_install_docs_mapping_cond_key(
-    ls: "LanguageServer",
+    ls: "DebputyLanguageServer",
 ) -> None:
     debputy_manifest_uri = "file:///nowhere/debian/debputy.manifest"
     cursor_pos = put_doc_with_cursor(
@@ -197,7 +192,7 @@ def test_basic_debputy_hover_install_docs_mapping_cond_key(
 
 @pytest.mark.xfail
 def test_basic_debputy_hover_install_docs_mapping_cond_str_value(
-    ls: "LanguageServer",
+    ls: "DebputyLanguageServer",
 ) -> None:
     debputy_manifest_uri = "file:///nowhere/debian/debputy.manifest"
     cursor_pos = put_doc_with_cursor(
@@ -230,7 +225,7 @@ def test_basic_debputy_hover_install_docs_mapping_cond_str_value(
     )
 
 
-def test_basic_debputy_hover_binary_version(ls: "LanguageServer") -> None:
+def test_basic_debputy_hover_binary_version(ls: "DebputyLanguageServer") -> None:
     debputy_manifest_uri = "file:///nowhere/debian/debputy.manifest"
     cursor_pos = put_doc_with_cursor(
         ls,
@@ -256,7 +251,7 @@ def test_basic_debputy_hover_binary_version(ls: "LanguageServer") -> None:
     )
 
 
-def test_basic_debputy_hover_services(ls: "LanguageServer") -> None:
+def test_basic_debputy_hover_services(ls: "DebputyLanguageServer") -> None:
     debputy_manifest_uri = "file:///nowhere/debian/debputy.manifest"
     cursor_pos = put_doc_with_cursor(
         ls,
@@ -283,7 +278,7 @@ def test_basic_debputy_hover_services(ls: "LanguageServer") -> None:
     )
 
 
-def test_basic_debputy_hover_services_service(ls: "LanguageServer") -> None:
+def test_basic_debputy_hover_services_service(ls: "DebputyLanguageServer") -> None:
     debputy_manifest_uri = "file:///nowhere/debian/debputy.manifest"
     cursor_pos = put_doc_with_cursor(
         ls,

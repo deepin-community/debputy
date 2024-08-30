@@ -8,6 +8,7 @@ import itertools
 import operator
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -37,7 +38,7 @@ from debian.deb822 import Deb822
 
 from debputy._deb_options_profiles import DebBuildOptionsAndProfiles
 from debputy.architecture_support import DpkgArchitectureBuildProcessValuesTable
-from debputy.debhelper_emulation import (
+from debputy.dh.debhelper_emulation import (
     dhe_install_pkg_file_as_ctrl_file_if_present,
     dhe_dbgsym_root_dir,
 )
@@ -80,7 +81,7 @@ from debputy.util import (
     _error,
     ensure_dir,
     assume_not_none,
-    perl_module_dirs,
+    resolve_perl_config,
     perlxs_api_dependency,
     detect_fakeroot,
     grouper,
@@ -185,11 +186,11 @@ def handle_perl_code(
     fs_root: FSPath,
     substvars: FlushableSubstvars,
 ) -> None:
-    known_perl_inc_dirs = perl_module_dirs(dpkg_architecture_variables, dctrl_bin)
+    perl_config_data = resolve_perl_config(dpkg_architecture_variables, dctrl_bin)
     detected_dep_requirements = 0
 
     # MakeMaker always makes lib and share dirs, but typically only one directory is actually used.
-    for perl_inc_dir in known_perl_inc_dirs:
+    for perl_inc_dir in (perl_config_data.vendorarch, perl_config_data.vendorlib):
         p = fs_root.lookup(perl_inc_dir)
         if p and p.is_dir:
             p.prune_if_empty_dir()
@@ -197,8 +198,8 @@ def handle_perl_code(
     # FIXME: 80% of this belongs in a metadata detector, but that requires us to expose .walk() in the public API,
     #  which will not be today.
     for d, pm_mode in [
-        (known_perl_inc_dirs.vendorlib, PERL_DEP_INDEP_PM_MODULE),
-        (known_perl_inc_dirs.vendorarch, PERL_DEP_ARCH_PM_MODULE),
+        (perl_config_data.vendorlib, PERL_DEP_INDEP_PM_MODULE),
+        (perl_config_data.vendorarch, PERL_DEP_ARCH_PM_MODULE),
     ]:
         inc_dir = fs_root.lookup(d)
         if not inc_dir:
@@ -698,12 +699,17 @@ def _attach_debug(objcopy: str, elf_binary: VirtualPath, dbgsym: FSPath) -> None
             )
 
 
+@functools.lru_cache()
+def _has_tool(tool: str) -> bool:
+    return shutil.which(tool) is not None
+
+
 def _run_dwz(
     dctrl: BinaryPackage,
     dbgsym_fs_root: FSPath,
     unstripped_elf_info: List[_ElfInfo],
 ) -> None:
-    if not unstripped_elf_info or dctrl.is_udeb:
+    if not unstripped_elf_info or dctrl.is_udeb or not _has_tool("dwz"):
         return
     dwz_cmd = ["dwz"]
     dwz_ma_dir_name = f"usr/lib/debug/.dwz/{dctrl.deb_multiarch}"
@@ -930,7 +936,7 @@ def _relevant_service_definitions(
         if key in by_service_manager_key
         and service_rule.applies_to_service_manager(key[-1])
     }
-    relevant_names = {}
+    relevant_names: Dict[Tuple[str, str, str, str], ServiceDefinition[Any]] = {}
     seen_keys = set()
 
     if not pending_queue:
@@ -954,7 +960,7 @@ def _relevant_service_definitions(
                 ):
                     pending_queue.add(target_key)
 
-    return relevant_names
+    return relevant_names.items()
 
 
 def handle_service_management(
@@ -982,7 +988,9 @@ def handle_service_management(
                 )
 
     for service_manager_details in feature_set.service_managers.values():
-        service_registry = ServiceRegistryImpl(service_manager_details)
+        service_registry: ServiceRegistryImpl = ServiceRegistryImpl(
+            service_manager_details
+        )
         service_manager_details.service_detector(
             fs_root,
             service_registry,
@@ -1214,7 +1222,7 @@ def setup_control_files(
         return
 
     if generated_triggers:
-        assert not allow_ctrl_file_management
+        assert allow_ctrl_file_management
         dest_file = os.path.join(control_output_dir, "triggers")
         with open(dest_file, "at", encoding="utf-8") as fd:
             fd.writelines(
@@ -1329,6 +1337,8 @@ def _generate_dbgsym_control_file_if_relevant(
         component = section.split("/", 1)[1] + "/"
     if multi_arch != "same":
         extra_params.append("-UMulti-Arch")
+    else:
+        extra_params.append(f"-DMulti-Arch={multi_arch}")
     extra_params.append("-UReplaces")
     extra_params.append("-UBreaks")
     dbgsym_control_dir = os.path.join(dbgsym_root_dir, "DEBIAN")
@@ -1652,6 +1662,7 @@ def _generate_control_files(
             dctrl_file = "debian/control"
 
         if has_dbgsym:
+            assert dbgsym_root_fs is not None  # mypy hint
             _generate_dbgsym_control_file_if_relevant(
                 binary_package,
                 dbgsym_root_fs,

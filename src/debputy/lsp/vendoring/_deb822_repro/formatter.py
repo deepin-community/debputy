@@ -207,6 +207,7 @@ def one_value_per_line_formatter(
             indent_len = len(name) + 2
         else:
             indent_len = indentation
+            assert isinstance(indent_len, int)  # hint for PyCharm
         indent = " " * indent_len
 
         emitted_first_line = False

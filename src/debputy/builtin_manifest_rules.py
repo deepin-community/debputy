@@ -17,7 +17,7 @@ from debputy.path_matcher import (
 )
 from debputy.substitution import Substitution
 from debputy.types import VP
-from debputy.util import _normalize_path, perl_module_dirs
+from debputy.util import _normalize_path, resolve_perl_config
 
 # Imported from dh_fixperms
 _PERMISSION_NORMALIZATION_SOURCE_DEFINITION = "permission normalization"
@@ -218,20 +218,19 @@ def builtin_mode_normalization_rules(
         OctalMode(0o0644),
     )
 
+    perl_config_data = resolve_perl_config(dpkg_architecture_variables, dctrl_bin)
+
     yield from (
         (
             BasenameGlobMatch(
                 "*.pm",
-                only_when_in_directory=perl_dir,
+                only_when_in_directory=_normalize_path(perl_dir),
                 path_type=PathType.FILE,
                 recursive_match=True,
             ),
-            SymbolicMode.parse_filesystem_mode(
-                "a-x",
-                attribute_path['"*.pm'],
-            ),
+            _STD_FILE_MODE,
         )
-        for perl_dir in perl_module_dirs(dpkg_architecture_variables, dctrl_bin)
+        for perl_dir in (perl_config_data.vendorlib, perl_config_data.vendorarch)
     )
 
     yield (
@@ -241,10 +240,7 @@ def builtin_mode_normalization_rules(
             path_type=PathType.FILE,
             recursive_match=True,
         ),
-        SymbolicMode.parse_filesystem_mode(
-            "a-w",
-            attribute_path['"*.ali"'],
-        ),
+        OctalMode(0o444),
     )
 
     yield (

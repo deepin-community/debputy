@@ -1,13 +1,21 @@
-from typing import List, TypedDict, NotRequired, Annotated, Union, Mapping
+from typing import (
+    List,
+    TypedDict,
+    NotRequired,
+    Annotated,
+    Union,
+    Mapping,
+)
 
 import pytest
 
 from debputy.highlevel_manifest import PackageTransformationDefinition
-from debputy.manifest_parser.base_types import DebputyParsedContent, TypeMapping
-from debputy.manifest_parser.declarative_parser import (
-    DebputyParseHint,
-    ParserGenerator,
+from debputy.manifest_parser.tagging_types import (
+    DebputyParsedContent,
+    TypeMapping,
 )
+from debputy.manifest_parser.parse_hints import DebputyParseHint
+from debputy.manifest_parser.declarative_parser import ParserGenerator
 from debputy.manifest_parser.mapper_code import type_mapper_str2package
 from debputy.manifest_parser.parser_data import ParserContextData
 from debputy.manifest_parser.util import AttributePath
@@ -25,7 +33,7 @@ class TFinalEntity(DebputyParsedContent):
 
 class TSourceEntity(TypedDict):
     sources: NotRequired[List[str]]
-    source: Annotated[NotRequired[str], DebputyParseHint.target_attribute("sources")]
+    source: NotRequired[Annotated[str, DebputyParseHint.target_attribute("sources")]]
     as_: NotRequired[
         Annotated[
             str,

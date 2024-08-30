@@ -3,14 +3,13 @@ from typing import (
     Union,
     Sequence,
     Tuple,
-    Iterator,
     Optional,
-    Iterable,
     Mapping,
     List,
+    Dict,
 )
 
-from lsprotocol.types import (
+from debputy.lsprotocol.types import (
     DiagnosticSeverity,
     Range,
     Diagnostic,
@@ -18,7 +17,6 @@ from lsprotocol.types import (
     CompletionItem,
     CompletionList,
     CompletionParams,
-    TEXT_DOCUMENT_WILL_SAVE_WAIT_UNTIL,
     DiagnosticRelatedInformation,
     Location,
     HoverParams,
@@ -28,9 +26,14 @@ from lsprotocol.types import (
     SemanticTokensParams,
     FoldingRangeParams,
     FoldingRange,
+    WillSaveTextDocumentParams,
+    TextEdit,
+    DocumentFormattingParams,
 )
 
 from debputy.linting.lint_util import LintState
+from debputy.lsp.debputy_ls import DebputyLanguageServer
+from debputy.lsp.diagnostics import DiagnosticData
 from debputy.lsp.lsp_debian_control_reference_data import (
     Deb822KnownField,
     DTestsCtrlFileMetadata,
@@ -43,12 +46,17 @@ from debputy.lsp.lsp_features import (
     lsp_standard_handler,
     lsp_folding_ranges,
     lsp_semantic_tokens_full,
+    lsp_will_save_wait_until,
+    lsp_format_document,
+    LanguageDispatch,
 )
 from debputy.lsp.lsp_generic_deb822 import (
     deb822_completer,
     deb822_hover,
     deb822_folding_ranges,
     deb822_semantic_tokens_full,
+    deb822_token_iter,
+    deb822_format_file,
 )
 from debputy.lsp.quickfixes import (
     propose_correct_text_quick_fix,
@@ -57,11 +65,9 @@ from debputy.lsp.spellchecking import default_spellchecker
 from debputy.lsp.text_util import (
     normalize_dctrl_field_name,
     LintCapablePositionCodec,
-    detect_possible_typo,
     te_range_to_lsp,
 )
 from debputy.lsp.vendoring._deb822_repro import (
-    parse_deb822_file,
     Deb822FileElement,
     Deb822ParagraphElement,
 )
@@ -69,9 +75,7 @@ from debputy.lsp.vendoring._deb822_repro.parsing import (
     Deb822KeyValuePairElement,
     LIST_SPACE_SEPARATED_INTERPRETATION,
 )
-from debputy.lsp.vendoring._deb822_repro.tokens import (
-    Deb822Token,
-)
+from debputy.util import detect_possible_typo
 
 try:
     from debputy.lsp.vendoring._deb822_repro.locatable import (
@@ -88,66 +92,40 @@ except ImportError:
 
 _CONTAINS_SPACE_OR_COLON = re.compile(r"[\s:]")
 _LANGUAGE_IDS = [
-    "debian/tests/control",
+    LanguageDispatch.from_language_id("debian/tests/control"),
     # emacs's name - expected in elpa-dpkg-dev-el (>> 37.11)
-    "debian-autopkgtest-control-mode",
+    LanguageDispatch.from_language_id("debian-autopkgtest-control-mode"),
     # Likely to be vim's name if it had support
-    "debtestscontrol",
+    LanguageDispatch.from_language_id("debtestscontrol"),
 ]
 
-_DEP5_FILE_METADATA = DTestsCtrlFileMetadata()
+_DTESTS_CTRL_FILE_METADATA = DTestsCtrlFileMetadata()
 
 lsp_standard_handler(_LANGUAGE_IDS, TEXT_DOCUMENT_CODE_ACTION)
-lsp_standard_handler(_LANGUAGE_IDS, TEXT_DOCUMENT_WILL_SAVE_WAIT_UNTIL)
 
 
 @lsp_hover(_LANGUAGE_IDS)
 def debian_tests_control_hover(
-    ls: "LanguageServer",
+    ls: "DebputyLanguageServer",
     params: HoverParams,
 ) -> Optional[Hover]:
-    return deb822_hover(ls, params, _DEP5_FILE_METADATA)
+    return deb822_hover(ls, params, _DTESTS_CTRL_FILE_METADATA)
 
 
 @lsp_completer(_LANGUAGE_IDS)
 def debian_tests_control_completions(
-    ls: "LanguageServer",
+    ls: "DebputyLanguageServer",
     params: CompletionParams,
 ) -> Optional[Union[CompletionList, Sequence[CompletionItem]]]:
-    return deb822_completer(ls, params, _DEP5_FILE_METADATA)
+    return deb822_completer(ls, params, _DTESTS_CTRL_FILE_METADATA)
 
 
 @lsp_folding_ranges(_LANGUAGE_IDS)
 def debian_tests_control_folding_ranges(
-    ls: "LanguageServer",
+    ls: "DebputyLanguageServer",
     params: FoldingRangeParams,
 ) -> Optional[Sequence[FoldingRange]]:
-    return deb822_folding_ranges(ls, params, _DEP5_FILE_METADATA)
-
-
-def _deb822_token_iter(
-    tokens: Iterable[Deb822Token],
-) -> Iterator[Tuple[Deb822Token, int, int, int, int, int]]:
-    line_no = 0
-    line_offset = 0
-
-    for token in tokens:
-        start_line = line_no
-        start_line_offset = line_offset
-
-        newlines = token.text.count("\n")
-        line_no += newlines
-        text_len = len(token.text)
-        if newlines:
-            if token.text.endswith("\n"):
-                line_offset = 0
-            else:
-                # -2, one to remove the "\n" and one to get 0-offset
-                line_offset = text_len - token.text.rindex("\n") - 2
-        else:
-            line_offset += text_len
-
-        yield token, start_line, start_line_offset, line_no, line_offset
+    return deb822_folding_ranges(ls, params, _DTESTS_CTRL_FILE_METADATA)
 
 
 def _paragraph_representation_field(
@@ -157,12 +135,12 @@ def _paragraph_representation_field(
 
 
 def _diagnostics_for_paragraph(
+    deb822_file: Deb822FileElement,
     stanza: Deb822ParagraphElement,
     stanza_position: "TEPosition",
     known_fields: Mapping[str, Deb822KnownField],
     doc_reference: str,
-    position_codec: "LintCapablePositionCodec",
-    lines: List[str],
+    lint_state: LintState,
     diagnostics: List[Diagnostic],
 ) -> None:
     representation_field = _paragraph_representation_field(stanza)
@@ -174,21 +152,22 @@ def _diagnostics_for_paragraph(
             representation_field_pos, representation_field.size()
         )
     )
-    representation_field_range = position_codec.range_to_client_units(
-        lines,
+    representation_field_range = lint_state.position_codec.range_to_client_units(
+        lint_state.lines,
         representation_field_range_server_units,
     )
     for known_field in known_fields.values():
-        missing_field_severity = known_field.missing_field_severity
-        if missing_field_severity is None or known_field.name in stanza:
+        if known_field.name in stanza:
             continue
 
-        diagnostics.append(
-            Diagnostic(
+        diagnostics.extend(
+            known_field.field_omitted_diagnostics(
+                deb822_file,
                 representation_field_range,
-                f"Stanza is missing field {known_field.name}",
-                severity=missing_field_severity,
-                source="debputy",
+                stanza,
+                stanza_position,
+                None,
+                lint_state,
             )
         )
 
@@ -196,7 +175,7 @@ def _diagnostics_for_paragraph(
         diagnostics.append(
             Diagnostic(
                 representation_field_range,
-                f'Stanza must have either a "Tests" or a "Test-Command" field',
+                'Stanza must have either a "Tests" or a "Test-Command" field',
                 severity=DiagnosticSeverity.Error,
                 source="debputy",
             )
@@ -211,7 +190,7 @@ def _diagnostics_for_paragraph(
             )
         )
 
-    seen_fields = {}
+    seen_fields: Dict[str, Tuple[str, str, Range, List[Range]]] = {}
 
     for kvpair in stanza.iter_parts_of_type(Deb822KeyValuePairElement):
         field_name_token = kvpair.field_token
@@ -220,11 +199,14 @@ def _diagnostics_for_paragraph(
         normalized_field_name_lc = normalize_dctrl_field_name(field_name_lc)
         known_field = known_fields.get(normalized_field_name_lc)
         field_value = stanza[field_name]
-        field_range_te = kvpair.range_in_parent().relative_to(stanza_position)
+        kvpair_range_te = kvpair.range_in_parent().relative_to(stanza_position)
+        field_range_te = kvpair.field_token.range_in_parent().relative_to(
+            kvpair_range_te.start_pos
+        )
         field_position_te = field_range_te.start_pos
         field_range_server_units = te_range_to_lsp(field_range_te)
-        field_range = position_codec.range_to_client_units(
-            lines,
+        field_range = lint_state.position_codec.range_to_client_units(
+            lint_state.lines,
             field_range_server_units,
         )
         field_name_typo_detected = False
@@ -249,8 +231,8 @@ def _diagnostics_for_paragraph(
                         field_position_te, kvpair.field_token.size()
                     )
                 )
-                field_range = position_codec.range_to_client_units(
-                    lines,
+                field_range = lint_state.position_codec.range_to_client_units(
+                    lint_state.lines,
                     token_range_server_units,
                 )
                 field_name_typo_detected = True
@@ -260,10 +242,12 @@ def _diagnostics_for_paragraph(
                         f'The "{field_name}" looks like a typo of "{known_field.name}".',
                         severity=DiagnosticSeverity.Warning,
                         source="debputy",
-                        data=[
-                            propose_correct_text_quick_fix(known_fields[m].name)
-                            for m in candidates
-                        ],
+                        data=DiagnosticData(
+                            quickfixes=[
+                                propose_correct_text_quick_fix(known_fields[m].name)
+                                for m in candidates
+                            ]
+                        ),
                     )
                 )
         if field_value.strip() == "":
@@ -276,13 +260,16 @@ def _diagnostics_for_paragraph(
                 )
             )
             continue
+        if known_field is None:
+            continue
         diagnostics.extend(
             known_field.field_diagnostics(
+                deb822_file,
                 kvpair,
                 stanza,
                 stanza_position,
-                position_codec,
-                lines,
+                kvpair_range_te,
+                lint_state,
                 field_name_typo_reported=field_name_typo_detected,
             )
         )
@@ -311,8 +298,8 @@ def _diagnostics_for_paragraph(
                     word_range_server_units = te_range_to_lsp(
                         TERange.from_position_and_size(word_pos_te, word_range)
                     )
-                    word_range = position_codec.range_to_client_units(
-                        lines,
+                    word_range = lint_state.position_codec.range_to_client_units(
+                        lint_state.lines,
                         word_range_server_units,
                     )
                     diagnostics.append(
@@ -321,9 +308,13 @@ def _diagnostics_for_paragraph(
                             f'Spelling "{word}"',
                             severity=DiagnosticSeverity.Hint,
                             source="debputy",
-                            data=[
-                                propose_correct_text_quick_fix(c) for c in corrections
-                            ],
+                            data=DiagnosticData(
+                                lint_severity="spelling",
+                                quickfixes=[
+                                    propose_correct_text_quick_fix(c)
+                                    for c in corrections
+                                ],
+                            ),
                         )
                     )
         if known_field.warn_if_default and field_value == known_field.default_value:
@@ -384,7 +375,7 @@ def _scan_for_syntax_errors_and_token_level_diagnostics(
         start_offset,
         end_line,
         end_offset,
-    ) in _deb822_token_iter(deb822_file.iter_tokens()):
+    ) in deb822_token_iter(deb822_file.iter_tokens()):
         if token.is_error:
             first_error = min(first_error, start_line)
             start_pos = Position(
@@ -428,7 +419,12 @@ def _scan_for_syntax_errors_and_token_level_diagnostics(
                         f'Spelling "{word}"',
                         severity=DiagnosticSeverity.Hint,
                         source="debputy",
-                        data=[propose_correct_text_quick_fix(c) for c in corrections],
+                        data=DiagnosticData(
+                            lint_severity="spelling",
+                            quickfixes=[
+                                propose_correct_text_quick_fix(c) for c in corrections
+                            ],
+                        ),
                     )
                 )
     return first_error
@@ -441,12 +437,8 @@ def _lint_debian_tests_control(
     lines = lint_state.lines
     position_codec = lint_state.position_codec
     doc_reference = lint_state.doc_uri
-    diagnostics = []
-    deb822_file = parse_deb822_file(
-        lines,
-        accept_files_with_duplicated_fields=True,
-        accept_files_with_error_tokens=True,
-    )
+    diagnostics: List[Diagnostic] = []
+    deb822_file = lint_state.parsed_deb822_file_content
 
     first_error = _scan_for_syntax_errors_and_token_level_diagnostics(
         deb822_file,
@@ -463,24 +455,50 @@ def _lint_debian_tests_control(
             break
         known_fields = _DTESTSCTRL_FIELDS
         _diagnostics_for_paragraph(
+            deb822_file,
             paragraph,
             paragraph_pos,
             known_fields,
             doc_reference,
-            position_codec,
-            lines,
+            lint_state,
             diagnostics,
         )
     return diagnostics
 
 
+@lsp_will_save_wait_until(_LANGUAGE_IDS)
+def _debian_tests_control_on_save_formatting(
+    ls: "DebputyLanguageServer",
+    params: WillSaveTextDocumentParams,
+) -> Optional[Sequence[TextEdit]]:
+    doc = ls.workspace.get_text_document(params.text_document.uri)
+    lint_state = ls.lint_state(doc)
+    return deb822_format_file(lint_state, _DTESTS_CTRL_FILE_METADATA)
+
+
+def _reformat_debian_tests_control(
+    lint_state: LintState,
+) -> Optional[Sequence[TextEdit]]:
+    return deb822_format_file(lint_state, _DTESTS_CTRL_FILE_METADATA)
+
+
+@lsp_format_document(_LANGUAGE_IDS)
+def _debian_tests_control_on_save_formatting(
+    ls: "DebputyLanguageServer",
+    params: DocumentFormattingParams,
+) -> Optional[Sequence[TextEdit]]:
+    doc = ls.workspace.get_text_document(params.text_document.uri)
+    lint_state = ls.lint_state(doc)
+    return deb822_format_file(lint_state, _DTESTS_CTRL_FILE_METADATA)
+
+
 @lsp_semantic_tokens_full(_LANGUAGE_IDS)
-def _semantic_tokens_full(
-    ls: "LanguageServer",
+def _debian_tests_control_semantic_tokens_full(
+    ls: "DebputyLanguageServer",
     request: SemanticTokensParams,
 ) -> Optional[SemanticTokens]:
     return deb822_semantic_tokens_full(
         ls,
         request,
-        _DEP5_FILE_METADATA,
+        _DTESTS_CTRL_FILE_METADATA,
     )

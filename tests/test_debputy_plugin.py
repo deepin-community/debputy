@@ -1,6 +1,6 @@
 import os
 import textwrap
-from typing import Sequence
+from typing import Sequence, Any, List, Optional
 
 import pytest
 
@@ -19,6 +19,16 @@ from debputy.plugin.api.test_api import (
 from debputy.plugin.api.test_api import manifest_variable_resolution_context
 from debputy.plugin.api.test_api.test_impl import initialize_plugin_under_test_preloaded
 from debputy.plugin.api.test_api.test_spec import DetectedService
+from debputy.plugin.debputy.build_system_rules import (
+    AutoconfBuildSystemRule,
+    MakefileBuildSystemRule,
+    PerlBuildBuildSystemRule,
+    PerlMakeMakerBuildSystemRule,
+    QmakeBuildSystemRule,
+    Qmake6BuildSystemRule,
+    CMakeBuildSystemRule,
+    MesonBuildSystemRule,
+)
 from debputy.plugin.debputy.debputy_plugin import initialize_debputy_features
 from debputy.plugin.debputy.private_api import load_libcap
 from debputy.plugin.debputy.service_management import SystemdServiceContext
@@ -643,6 +653,8 @@ def test_system_service_detection() -> None:
     systemd_service_system_dir = f"{systemd_service_root_dir}/system"
     systemd_service_user_dir = f"{systemd_service_root_dir}/user"
 
+    services: List[DetectedService[Optional[object]]]
+
     services, _ = plugin.run_service_detection_and_integrations(
         "systemd", build_virtual_file_system([])
     )
@@ -704,7 +716,9 @@ def test_system_service_detection() -> None:
     assert foo_service.enable_by_default
     assert foo_service.start_by_default
     assert foo_service.default_upgrade_rule == "restart"
-    assert foo_service.service_context.had_install_section
+    foo_service_context = foo_service.service_context
+    assert isinstance(foo_service_context, SystemdServiceContext)
+    assert foo_service_context.had_install_section
 
     bar_timer = _extract_service(services, "bar.timer")
     assert set(bar_timer.names) == {"bar.timer"}
@@ -713,7 +727,9 @@ def test_system_service_detection() -> None:
     assert not bar_timer.enable_by_default
     assert bar_timer.start_by_default
     assert bar_timer.default_upgrade_rule == "restart"
-    assert not bar_timer.service_context.had_install_section
+    bar_service_context = bar_timer.service_context
+    assert isinstance(bar_service_context, SystemdServiceContext)
+    assert not bar_service_context.had_install_section
 
     snippets = metadata.maintscripts()
     assert len(snippets) == 4
@@ -741,6 +757,8 @@ def test_sysv_service_detection() -> None:
         load_debputy_plugin=False,
     )
     init_dir = "etc/init.d"
+
+    services: List[DetectedService[Optional[object]]]
 
     services, _ = plugin.run_service_detection_and_integrations(
         "sysvinit", build_virtual_file_system([])
@@ -1135,9 +1153,9 @@ def test_pam_auth_update() -> None:
     assert postinst.registration_method == "on_configure"
     assert "pam-auth-update --package" in postinst.plugin_provided_script
 
-    prerms = prerms[0]
-    assert prerms.registration_method == "on_before_removal"
-    assert "pam-auth-update --package --remove foo-pam" in prerms.plugin_provided_script
+    prerm = prerms[0]
+    assert prerm.registration_method == "on_before_removal"
+    assert "pam-auth-update --package --remove foo-pam" in prerm.plugin_provided_script
 
 
 def test_auto_depends_solink() -> None:
@@ -1244,3 +1262,129 @@ def test_auto_depends_solink() -> None:
         context=context_too_many_matches,
     )
     assert "misc:Depends" not in sodep_metadata.substvars
+
+
+@pytest.mark.parametrize(
+    "filename,expected,mode,content",
+    [
+        ("configure.ac", True, 0o0644, None),
+        ("configure.in", True, 0o0644, "AC_INIT"),
+        ("configure.in", True, 0o0644, "AC_PREREQ"),
+        ("configure.in", False, 0o0644, "None of the above"),
+        ("configure", True, 0o0755, "GNU Autoconf"),
+        ("configure", False, 0o0644, "GNU Autoconf"),
+        ("configure", False, 0o0755, "No magic keyword"),
+        ("random-file", False, 0o0644, "No configure at all"),
+    ],
+)
+def test_auto_detect_autoconf_build_system(
+    filename: str,
+    expected: bool,
+    mode: int,
+    content: Optional[str],
+) -> None:
+    fs_root = build_virtual_file_system(
+        [virtual_path_def(filename, mode=mode, content=content)]
+    )
+    detected = AutoconfBuildSystemRule.auto_detect_build_system(fs_root)
+    assert detected == expected
+
+
+@pytest.mark.parametrize(
+    "filename,expected",
+    [
+        ("GNUmakefile", True),
+        ("Makefile", True),
+        ("makefile", True),
+        ("random-file", False),
+    ],
+)
+def test_auto_detect_make_build_system(
+    filename: str,
+    expected: bool,
+) -> None:
+    fs_root = build_virtual_file_system([filename])
+    detected = MakefileBuildSystemRule.auto_detect_build_system(fs_root)
+    assert detected == expected
+
+
+@pytest.mark.parametrize(
+    "filename,expected",
+    [
+        ("Build.PL", True),
+        ("random-file", False),
+    ],
+)
+def test_auto_detect_perl_build_build_system(
+    filename: str,
+    expected: bool,
+) -> None:
+    fs_root = build_virtual_file_system([filename])
+    detected = PerlBuildBuildSystemRule.auto_detect_build_system(fs_root)
+    assert detected == expected
+
+
+@pytest.mark.parametrize(
+    "filename,expected",
+    [
+        ("Makefile.PL", True),
+        ("random-file", False),
+    ],
+)
+def test_auto_detect_perl_makemaker_build_system(
+    filename: str,
+    expected: bool,
+) -> None:
+    fs_root = build_virtual_file_system([filename])
+    detected = PerlMakeMakerBuildSystemRule.auto_detect_build_system(fs_root)
+    assert detected == expected
+
+
+@pytest.mark.parametrize(
+    "filename,expected",
+    [
+        ("foo.pro", True),
+        ("random-file", False),
+    ],
+)
+def test_auto_detect_qmake_build_systems(
+    filename: str,
+    expected: bool,
+) -> None:
+    fs_root = build_virtual_file_system([filename])
+    detected_qmake = QmakeBuildSystemRule.auto_detect_build_system(fs_root)
+    detected_qmake6 = Qmake6BuildSystemRule.auto_detect_build_system(fs_root)
+    assert detected_qmake == expected
+    assert detected_qmake6 == expected
+
+
+@pytest.mark.parametrize(
+    "filename,expected",
+    [
+        ("CMakeLists.txt", True),
+        ("random-file", False),
+    ],
+)
+def test_auto_detect_cmake_build_systems(
+    filename: str,
+    expected: bool,
+) -> None:
+    fs_root = build_virtual_file_system([filename])
+    detected = CMakeBuildSystemRule.auto_detect_build_system(fs_root)
+    assert detected == expected
+
+
+@pytest.mark.parametrize(
+    "filename,expected",
+    [
+        ("meson.build", True),
+        ("random-file", False),
+    ],
+)
+def test_auto_detect_meson_build_systems(
+    filename: str,
+    expected: bool,
+) -> None:
+    fs_root = build_virtual_file_system([filename])
+    detected = MesonBuildSystemRule.auto_detect_build_system(fs_root)
+    assert detected == expected

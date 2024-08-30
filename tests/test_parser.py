@@ -34,6 +34,7 @@ def manifest_parser_pkg_foo(
         dpkg_arch_query,
         no_profiles_or_build_options,
         debputy_plugin_feature_set,
+        "full",
         debian_dir=debian_dir,
     )
 
@@ -123,7 +124,10 @@ def test_parsing_variables_reserved(manifest_parser_pkg_foo, varname):
     with pytest.raises(ManifestParseException) as e_info:
         manifest_parser_pkg_foo.parse_manifest(fd=content)
 
-    msg = f'The variable "{varname}" is already reserved/defined. Error triggered by definitions.variables.{varname}.'
+    msg = (
+        f'The variable "{varname}" is already reserved/defined.'
+        f" Error triggered by definitions.variables.{varname} [Line 4 column 4]."
+    )
     assert normalize_doc_link(e_info.value.args[0]) == msg
 
 
@@ -162,7 +166,7 @@ def test_parsing_variables_unused(manifest_parser_pkg_foo):
 
     msg = (
         'The variable "UNUSED" is unused. Either use it or remove it.'
-        " The variable was declared at definitions.variables.UNUSED."
+        " The variable was declared at definitions.variables.UNUSED [Line 4 column 4]."
     )
     assert normalize_doc_link(e_info.value.args[0]) == msg
 
@@ -180,7 +184,7 @@ def test_parsing_package_foo_empty(manifest_parser_pkg_foo):
         manifest_parser_pkg_foo.parse_manifest(fd=content)
 
     msg = (
-        "The attribute packages.foo must be a non-empty mapping. Please see"
+        "The attribute packages.foo [Line 3 column 4] must be a non-empty mapping. Please see"
         " {{DEBPUTY_DOC_ROOT_DIR}}/MANIFEST-FORMAT.md#binary-package-rules for the documentation."
     )
     assert normalize_doc_link(e_info.value.args[0]) == msg
@@ -237,8 +241,8 @@ def test_create_symlinks_missing_path(manifest_parser_pkg_foo):
         manifest_parser_pkg_foo.parse_manifest(fd=content)
 
     msg = (
-        "The following keys were required but not present at packages.foo.transformations[0].create-symlink: 'path'"
-        " (Documentation: "
+        "The following keys were required but not present at packages.foo.transformations[0].create-symlink"
+        " [Line 5 column 12]: 'path' (Documentation: "
         "{{DEBPUTY_DOC_ROOT_DIR}}/MANIFEST-FORMAT.md#create-symlinks-transformation-rule-create-symlink)"
     )
     assert normalize_doc_link(e_info.value.args[0]) == msg
@@ -262,7 +266,7 @@ def test_create_symlinks_unknown_replacement_rule(manifest_parser_pkg_foo):
         manifest_parser_pkg_foo.parse_manifest(fd=content)
 
     msg = (
-        'The attribute "packages.foo.transformations[0].create-symlink.replacement-rule <Search for: usr/share/foo>"'
+        'The attribute "packages.foo.transformations[0].create-symlink.replacement-rule [Line 8 column 32]"'
         " did not have a valid structure/type: Value (golf) must be one of the following literal values:"
         ' "error-if-exists", "error-if-directory", "abort-on-non-empty-directory", "discard-existing"'
     )
@@ -285,8 +289,8 @@ def test_create_symlinks_missing_target(manifest_parser_pkg_foo):
         manifest_parser_pkg_foo.parse_manifest(fd=content)
 
     msg = (
-        "The following keys were required but not present at packages.foo.transformations[0].create-symlink: 'target'"
-        " (Documentation: "
+        "The following keys were required but not present at packages.foo.transformations[0].create-symlink"
+        " [Line 5 column 12]: 'target' (Documentation: "
         "{{DEBPUTY_DOC_ROOT_DIR}}/MANIFEST-FORMAT.md#create-symlinks-transformation-rule-create-symlink)"
     )
     assert normalize_doc_link(e_info.value.args[0]) == msg
@@ -309,7 +313,7 @@ def test_create_symlinks_not_normalized_path(manifest_parser_pkg_foo):
         manifest_parser_pkg_foo.parse_manifest(fd=content)
 
     expected = (
-        'The path "../bar" provided in packages.foo.transformations[0].create-symlink.path <Search for: ../bar>'
+        'The path "../bar" provided in packages.foo.transformations[0].create-symlink.path [Line 6 column 20]'
         ' should be relative to the root of the package and not use any ".." or "." segments.'
     )
     assert e_info.value.args[0] == expected
@@ -331,7 +335,7 @@ def test_unresolvable_subst_in_source_context(manifest_parser_pkg_foo):
 
     expected = (
         "The variable {{PACKAGE}} is not available while processing installations[0].install.as"
-        " <Search for: foo.sh>."
+        " [Line 5 column 7]."
     )
 
     assert e_info.value.args[0] == expected
@@ -396,7 +400,7 @@ def test_yaml_octal_mode_int(manifest_parser_pkg_foo):
         manifest_parser_pkg_foo.parse_manifest(fd=content)
 
     msg = (
-        'The attribute "packages.foo.transformations[0].path-metadata.mode <Search for: usr/share/bar>" did not'
+        'The attribute "packages.foo.transformations[0].path-metadata.mode [Line 7 column 20]" did not'
         " have a valid structure/type: The attribute must be a FileSystemMode (string)"
     )
 
@@ -485,3 +489,86 @@ def test_yaml_clean_after_removal_unsafe_path(
     else:
         with pytest.raises(ManifestParseException) as e_info:
             manifest_parser_pkg_foo.parse_manifest(fd=content)
+
+
+def test_yaml_build_environment_default(
+    manifest_parser_pkg_foo: YAMLManifestParser,
+) -> None:
+    content = textwrap.dedent(
+        (
+            """\
+
+        manifest-version: '0.1'
+        default-build-environment:
+            set:
+              FOO: "bar"
+        builds:
+        # FIXME: we should not require an empty dict here
+        - autoconf: {}
+        """
+        )
+    )
+    manifest = manifest_parser_pkg_foo.parse_manifest(fd=content)
+    envs = manifest.build_environments
+    assert not envs.environments
+    base_env = {}
+    envs.default_environment.update_env(base_env)
+    assert "FOO" in base_env
+    build_rule = manifest.build_rules[0]
+    assert build_rule.environment is envs.default_environment
+
+
+def test_yaml_build_environments_no_default(
+    manifest_parser_pkg_foo: YAMLManifestParser,
+) -> None:
+    content = textwrap.dedent(
+        (
+            f"""\
+
+        manifest-version: '0.1'
+        build-environments:
+        - name: custom-env
+          set:
+            FOO: "bar"
+        builds:
+        - autoconf:
+             environment: custom-env
+        """
+        )
+    )
+    manifest = manifest_parser_pkg_foo.parse_manifest(fd=content)
+    envs = manifest.build_environments
+    assert "custom-env" in envs.environments
+    custom_env = envs.environments["custom-env"]
+    assert envs.default_environment is None
+    base_env = {}
+    custom_env.update_env(base_env)
+    assert "FOO" in base_env
+    build_rule = manifest.build_rules[0]
+    assert build_rule.environment is custom_env
+
+
+def test_yaml_build_environments_no_default_error(
+    manifest_parser_pkg_foo: YAMLManifestParser,
+) -> None:
+    content = textwrap.dedent(
+        (
+            """\
+
+        manifest-version: '0.1'
+        build-environments:
+        - name: custom-env
+          set:
+            FOO: "bar"
+        builds:
+        # FIXME: we should not require an empty dict here
+        - autoconf: {}
+        """
+        )
+    )
+    with pytest.raises(ManifestParseException) as e_info:
+        manifest_parser_pkg_foo.parse_manifest(fd=content)
+
+    expected_msg = "The following named environments were never referenced: custom-env"
+    msg = e_info.value.args[0]
+    assert msg == expected_msg

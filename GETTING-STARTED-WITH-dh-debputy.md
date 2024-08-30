@@ -44,9 +44,16 @@ your packaging. At the time of writing, your options are:
       converted at this time. Note that this mode does *not* interact well with most third-party
       `dh` addons. You are recommended to start with source packages without third-party `dh` addons.
 
+ 3) `full`: This mode exists but is beyond the scope of this guide. In this mode, `dh` and `debian/rules`
+    are removed from the build process. If `full` integration is your goal, using `dh-sequence-zz-debputy`
+    is a good starting point, as any actions needed for `dh-sequence-zz-debputy` will also be needed for
+    the `full` integration mode.
+
 Since you can always migrate from "less integrated" to "more integrated", you are recommended to start
 with `dh-sequence-zz-debputy-rrr` first. If that works, you can re-run the migration with
 `dh-sequence-zz-debputy` as the target to see if further integration seems feasible / desirable.
+
+For more details on integration modes, please see [INTEGRATION-MODES.md](INTEGRATION-MODES.md)
 
 Note: More options may appear in the future.
 

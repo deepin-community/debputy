@@ -15,10 +15,12 @@ install:
 	    $(DESTDIR)/$(DEBPUTY_INSTALLED_ROOT_DIR) \
 	    $(DESTDIR)/$(DEBPUTY_INSTALLED_PLUGIN_ROOT_DIR)/debputy \
 	    $(DESTDIR)/usr/share/perl5/Debian/Debhelper/Sequence \
+	    $(DESTDIR)/usr/share/perl5/Dpkg/BuildDriver \
 	    $(DESTDIR)/usr/share/man/man1
 	install -m0755 -t $(DESTDIR)/usr/bin dh_debputy dh_installdebputy assets/debputy
 	install -m0755 -t $(DESTDIR)/$(DEBPUTY_INSTALLED_ROOT_DIR) deb_packer.py deb_materialization.py
 	install -m0644 -t $(DESTDIR)/usr/share/perl5/Debian/Debhelper/Sequence lib/Debian/Debhelper/Sequence/*.pm
+	install -m0644 -t $(DESTDIR)/usr/share/perl5/Dpkg/BuildDriver lib/Dpkg/BuildDriver/*.pm
 	cp -a --reflink=auto src/debputy $(DESTDIR)/$(DEBPUTY_INSTALLED_ROOT_DIR)
 	cp -a --reflink=auto debputy $(DESTDIR)/$(DEBPUTY_INSTALLED_PLUGIN_ROOT_DIR)
 	sed -i "s/^__version__ =.*/__version__ = '$$(dpkg-parsechangelog -SVersion)'/; s/^__release_commit__ =.*/__release_commit__ = 'N\\/A'/;" \

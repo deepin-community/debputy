@@ -1,10 +1,10 @@
 from typing import NotRequired, List, Any, TypedDict
 
-from debputy.manifest_parser.base_types import (
+from debputy.manifest_parser.tagging_types import (
     DebputyParsedContent,
-    OctalMode,
     TypeMapping,
 )
+from debputy.manifest_parser.base_types import OctalMode
 from debputy.manifest_parser.declarative_parser import ParserGenerator
 from debputy.plugin.api.impl_types import KnownPackagingFileInfo
 

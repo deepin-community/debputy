@@ -17,14 +17,10 @@ from typing import (
 
 from debputy import DEBPUTY_DOC_ROOT_DIR
 from debputy.maintscript_snippet import DpkgMaintscriptHelperCommand, MaintscriptSnippet
-from debputy.manifest_parser.base_types import (
-    DebputyParsedContent,
-    FileSystemExactMatchRule,
-)
-from debputy.manifest_parser.declarative_parser import (
-    DebputyParseHint,
-    ParserGenerator,
-)
+from debputy.manifest_parser.base_types import FileSystemExactMatchRule
+from debputy.manifest_parser.tagging_types import DebputyParsedContent
+from debputy.manifest_parser.parse_hints import DebputyParseHint
+from debputy.manifest_parser.declarative_parser import ParserGenerator
 from debputy.manifest_parser.exceptions import ManifestParseException
 from debputy.manifest_parser.parser_data import ParserContextData
 from debputy.manifest_parser.util import AttributePath
@@ -34,12 +30,14 @@ from debputy.plugin.api.impl import (
     DebputyPluginInitializerProvider,
     ServiceDefinitionImpl,
 )
-from debputy.plugin.api.impl_types import OPARSER_PACKAGES
+from debputy.plugin.api.parser_tables import OPARSER_PACKAGES
 from debputy.plugin.api.spec import (
     ServiceUpgradeRule,
     ServiceDefinition,
     DSD,
     documented_attr,
+    INTEGRATION_MODE_DH_DEBPUTY_RRR,
+    not_integrations,
 )
 from debputy.transformation_rules import TransformationRule
 from debputy.util import _error
@@ -148,6 +146,9 @@ def register_binary_package_rules(api: DebputyPluginInitializerProvider) -> None
         "conffile-management",
         List[DpkgMaintscriptHelperCommand],
         _unpack_list,
+        expected_debputy_integration_mode=not_integrations(
+            INTEGRATION_MODE_DH_DEBPUTY_RRR
+        ),
     )
 
     api.pluggable_manifest_rule(
@@ -156,6 +157,9 @@ def register_binary_package_rules(api: DebputyPluginInitializerProvider) -> None
         List[ServiceRuleParsedFormat],
         _process_service_rules,
         source_format=List[ServiceRuleSourceFormat],
+        expected_debputy_integration_mode=not_integrations(
+            INTEGRATION_MODE_DH_DEBPUTY_RRR
+        ),
         inline_reference_documentation=reference_documentation(
             title="Define how services in the package will be handled (`services`)",
             description=textwrap.dedent(
@@ -273,6 +277,9 @@ def register_binary_package_rules(api: DebputyPluginInitializerProvider) -> None
         ListParsedFormat,
         _parse_clean_after_removal,
         source_format=List[Any],
+        expected_debputy_integration_mode=not_integrations(
+            INTEGRATION_MODE_DH_DEBPUTY_RRR
+        ),
         # FIXME: debputy won't see the attributes for this one :'(
         inline_reference_documentation=reference_documentation(
             title="Remove runtime created paths on purge or post removal (`clean-after-removal`)",
@@ -337,6 +344,9 @@ def register_binary_package_rules(api: DebputyPluginInitializerProvider) -> None
         InstallationSearchDirsParsedFormat,
         _parse_installation_search_dirs,
         source_format=List[FileSystemExactMatchRule],
+        expected_debputy_integration_mode=not_integrations(
+            INTEGRATION_MODE_DH_DEBPUTY_RRR
+        ),
         inline_reference_documentation=reference_documentation(
             title="Custom installation time search directories (`installation-search-dirs`)",
             description=textwrap.dedent(

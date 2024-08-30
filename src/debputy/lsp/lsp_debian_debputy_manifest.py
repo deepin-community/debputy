@@ -9,9 +9,30 @@ from typing import (
     Literal,
     get_args,
     get_origin,
+    Container,
 )
 
-from lsprotocol.types import (
+from debputy.highlevel_manifest import MANIFEST_YAML
+from debputy.linting.lint_util import LintState
+from debputy.lsp.diagnostics import DiagnosticData
+from debputy.lsp.lsp_features import (
+    lint_diagnostics,
+    lsp_standard_handler,
+    lsp_hover,
+    lsp_completer,
+    LanguageDispatch,
+)
+from debputy.lsp.lsp_generic_yaml import (
+    resolve_hover_text,
+    as_hover_doc,
+    is_before,
+    word_range_at_position,
+)
+from debputy.lsp.quickfixes import propose_correct_text_quick_fix
+from debputy.lsp.text_util import (
+    LintCapablePositionCodec,
+)
+from debputy.lsprotocol.types import (
     Diagnostic,
     TEXT_DOCUMENT_WILL_SAVE_WAIT_UNTIL,
     Position,
@@ -19,8 +40,6 @@ from lsprotocol.types import (
     DiagnosticSeverity,
     HoverParams,
     Hover,
-    MarkupKind,
-    MarkupContent,
     TEXT_DOCUMENT_CODE_ACTION,
     CompletionParams,
     CompletionList,
@@ -28,11 +47,27 @@ from lsprotocol.types import (
     DiagnosticRelatedInformation,
     Location,
 )
-
-from debputy.linting.lint_util import LintState
-from debputy.lsp.quickfixes import propose_correct_text_quick_fix
-from debputy.manifest_parser.base_types import DebputyDispatchableType
-from debputy.plugin.api.feature_set import PluginProvidedFeatureSet
+from debputy.manifest_parser.tagging_types import DebputyDispatchableType
+from debputy.manifest_parser.declarative_parser import (
+    AttributeDescription,
+    ParserGenerator,
+    DeclarativeNonMappingInputParser,
+)
+from debputy.manifest_parser.declarative_parser import DeclarativeMappingInputParser
+from debputy.manifest_parser.util import AttributePath
+from debputy.plugin.api.impl import plugin_metadata_for_debputys_own_plugin
+from debputy.plugin.api.impl_types import (
+    DeclarativeInputParser,
+    DispatchingParserBase,
+    DebputyPluginMetadata,
+    ListWrappedDeclarativeInputParser,
+    InPackageContextParser,
+    DeclarativeValuelessKeywordInputParser,
+)
+from debputy.plugin.api.parser_tables import OPARSER_MANIFEST_ROOT
+from debputy.plugin.api.spec import DebputyIntegrationMode
+from debputy.plugin.debputy.private_api import Capability, load_libcap
+from debputy.util import _info, detect_possible_typo
 from debputy.yaml.compat import (
     Node,
     CommentedMap,
@@ -43,42 +78,6 @@ from debputy.yaml.compat import (
     YAMLError,
 )
 
-from debputy.highlevel_manifest import MANIFEST_YAML
-from debputy.lsp.lsp_features import (
-    lint_diagnostics,
-    lsp_standard_handler,
-    lsp_hover,
-    lsp_completer,
-)
-from debputy.lsp.text_util import (
-    LintCapablePositionCodec,
-    detect_possible_typo,
-)
-from debputy.manifest_parser.declarative_parser import (
-    AttributeDescription,
-    ParserGenerator,
-    DeclarativeNonMappingInputParser,
-)
-from debputy.manifest_parser.declarative_parser import DeclarativeMappingInputParser
-from debputy.manifest_parser.parser_doc import (
-    render_rule,
-    render_attribute_doc,
-    doc_args_for_parser_doc,
-)
-from debputy.manifest_parser.util import AttributePath
-from debputy.plugin.api.impl import plugin_metadata_for_debputys_own_plugin
-from debputy.plugin.api.impl_types import (
-    OPARSER_MANIFEST_ROOT,
-    DeclarativeInputParser,
-    DispatchingParserBase,
-    DebputyPluginMetadata,
-    ListWrappedDeclarativeInputParser,
-    InPackageContextParser,
-    DeclarativeValuelessKeywordInputParser,
-)
-from debputy.util import _info, _warn
-
-
 try:
     from pygls.server import LanguageServer
     from debputy.lsp.debputy_ls import DebputyLanguageServer
@@ -87,42 +86,17 @@ except ImportError:
 
 
 _LANGUAGE_IDS = [
-    "debian/debputy.manifest",
-    "debputy.manifest",
+    LanguageDispatch.from_language_id("debian/debputy.manifest"),
+    LanguageDispatch.from_language_id("debputy.manifest"),
     # LSP's official language ID for YAML files
-    "yaml",
+    LanguageDispatch.from_language_id(
+        "yaml", filename_selector="debian/debputy.manifest"
+    ),
 ]
 
 
 lsp_standard_handler(_LANGUAGE_IDS, TEXT_DOCUMENT_CODE_ACTION)
 lsp_standard_handler(_LANGUAGE_IDS, TEXT_DOCUMENT_WILL_SAVE_WAIT_UNTIL)
-
-
-def is_valid_file(path: str) -> bool:
-    # For debian/debputy.manifest, the language ID is often set to makefile meaning we get random
-    # "non-debian/debputy.manifest" YAML files here. Skip those.
-    return path.endswith("debian/debputy.manifest")
-
-
-def _word_range_at_position(
-    lines: List[str],
-    line_no: int,
-    char_offset: int,
-) -> Range:
-    line = lines[line_no]
-    line_len = len(line)
-    start_idx = char_offset
-    end_idx = char_offset
-    while end_idx + 1 < line_len and not line[end_idx + 1].isspace():
-        end_idx += 1
-
-    while start_idx - 1 >= 0 and not line[start_idx - 1].isspace():
-        start_idx -= 1
-
-    return Range(
-        Position(line_no, start_idx),
-        Position(line_no, end_idx),
-    )
 
 
 @lint_diagnostics(_LANGUAGE_IDS)
@@ -131,10 +105,7 @@ def _lint_debian_debputy_manifest(
 ) -> Optional[List[Diagnostic]]:
     lines = lint_state.lines
     position_codec = lint_state.position_codec
-    path = lint_state.path
-    if not is_valid_file(path):
-        return None
-    diagnostics = []
+    diagnostics: List[Diagnostic] = []
     try:
         content = MANIFEST_YAML.load("".join(lines))
     except MarkedYAMLError as e:
@@ -146,7 +117,7 @@ def _lint_debian_debputy_manifest(
             column = e.problem_mark.column + 1
         error_range = position_codec.range_to_client_units(
             lines,
-            _word_range_at_position(
+            word_range_at_position(
                 lines,
                 line,
                 column,
@@ -178,28 +149,51 @@ def _lint_debian_debputy_manifest(
         feature_set = lint_state.plugin_feature_set
         pg = feature_set.manifest_parser_generator
         root_parser = pg.dispatchable_object_parsers[OPARSER_MANIFEST_ROOT]
+        debputy_integration_mode = lint_state.debputy_metadata.debputy_integration_mode
+
         diagnostics.extend(
             _lint_content(
                 lint_state,
                 pg,
                 root_parser,
+                debputy_integration_mode,
                 content,
             )
         )
     return diagnostics
 
 
-def _unknown_key(
+def _integration_mode_allows_key(
+    debputy_integration_mode: Optional[DebputyIntegrationMode],
+    expected_debputy_integration_modes: Optional[Container[DebputyIntegrationMode]],
     key: str,
-    expected_keys: Iterable[str],
     line: int,
     col: int,
     lines: List[str],
     position_codec: LintCapablePositionCodec,
-    *,
-    message_format: str = 'Unknown or unsupported key "{key}".',
-) -> Tuple["Diagnostic", Optional[str]]:
-    key_range = position_codec.range_to_client_units(
+) -> Iterable["Diagnostic"]:
+    if debputy_integration_mode is None or expected_debputy_integration_modes is None:
+        return
+    if debputy_integration_mode in expected_debputy_integration_modes:
+        return
+    key_range = _key_range(key, line, col, lines, position_codec)
+    yield Diagnostic(
+        key_range,
+        f'Feature "{key}" not supported in integration mode {debputy_integration_mode}',
+        DiagnosticSeverity.Error,
+        source="debputy",
+    )
+
+
+def _key_range(
+    key: str,
+    line: int,
+    col: int,
+    lines: List[str],
+    position_codec: LintCapablePositionCodec,
+) -> Range:
+    key_len = len(key) if key else 1
+    return position_codec.range_to_client_units(
         lines,
         Range(
             Position(
@@ -208,12 +202,25 @@ def _unknown_key(
             ),
             Position(
                 line,
-                col + len(key),
+                col + key_len,
             ),
         ),
     )
 
-    candidates = detect_possible_typo(key, expected_keys)
+
+def _unknown_key(
+    key: Optional[str],
+    expected_keys: Iterable[str],
+    line: int,
+    col: int,
+    lines: List[str],
+    position_codec: LintCapablePositionCodec,
+    *,
+    message_format: str = 'Unknown or unsupported key "{key}".',
+) -> Tuple["Diagnostic", Optional[str]]:
+    key_range = _key_range(key, line, col, lines, position_codec)
+
+    candidates = detect_possible_typo(key, expected_keys) if key is not None else ()
     extra = ""
     corrected_key = None
     if candidates:
@@ -222,12 +229,16 @@ def _unknown_key(
         #  That would enable this to work in more cases.
         corrected_key = candidates[0] if len(candidates) == 1 else None
 
+    if key is None:
+        message_format = "Missing key"
     diagnostic = Diagnostic(
         key_range,
         message_format.format(key=key) + extra,
         DiagnosticSeverity.Error,
         source="debputy",
-        data=[propose_correct_text_quick_fix(n) for n in candidates],
+        data=DiagnosticData(
+            quickfixes=[propose_correct_text_quick_fix(n) for n in candidates]
+        ),
     )
     return diagnostic, corrected_key
 
@@ -302,39 +313,96 @@ def _conflicting_key(
     )
 
 
+def _remaining_line(lint_state: LintState, line_no: int, pos_start: int) -> Range:
+    raw_line = lint_state.lines[line_no].rstrip()
+    pos_end = len(raw_line)
+    return lint_state.position_codec.range_to_client_units(
+        lint_state.lines,
+        Range(
+            Position(
+                line_no,
+                pos_start,
+            ),
+            Position(
+                line_no,
+                pos_end,
+            ),
+        ),
+    )
+
+
 def _lint_attr_value(
     lint_state: LintState,
     attr: AttributeDescription,
     pg: ParserGenerator,
+    debputy_integration_mode: Optional[DebputyIntegrationMode],
+    key: str,
     value: Any,
+    pos: Tuple[int, int],
 ) -> Iterable["Diagnostic"]:
-    attr_type = attr.attribute_type
-    orig = get_origin(attr_type)
-    valid_values: Sequence[Any] = tuple()
+    target_attr_type = attr.attribute_type
+    type_mapping = pg.get_mapped_type_from_target_type(target_attr_type)
+    source_attr_type = target_attr_type
+    if type_mapping is not None:
+        source_attr_type = type_mapping.source_type
+    orig = get_origin(source_attr_type)
+    valid_values: Optional[Sequence[Any]] = None
     if orig == Literal:
         valid_values = get_args(attr.attribute_type)
     elif orig == bool or attr.attribute_type == bool:
-        valid_values = ("true", "false")
-    elif isinstance(attr_type, type) and issubclass(attr_type, DebputyDispatchableType):
-        parser = pg.dispatch_parser_table_for(attr_type)
-        yield from _lint_content(
-            lint_state,
-            pg,
-            parser,
-            value,
-        )
-        return
+        valid_values = (True, False)
+    elif isinstance(target_attr_type, type):
+        if issubclass(target_attr_type, Capability):
+            has_libcap, _, is_valid_cap = load_libcap()
+            if has_libcap and not is_valid_cap(value):
+                line_no, cursor_pos = pos
+                cap_range = _remaining_line(lint_state, line_no, cursor_pos)
+                yield Diagnostic(
+                    cap_range,
+                    "The value could not be parsed as a capability via cap_from_text on this system",
+                    DiagnosticSeverity.Warning,
+                    source="debputy",
+                )
+            return
+        if issubclass(target_attr_type, DebputyDispatchableType):
+            parser = pg.dispatch_parser_table_for(target_attr_type)
+            yield from _lint_content(
+                lint_state,
+                pg,
+                parser,
+                debputy_integration_mode,
+                value,
+            )
+            return
 
-    if value in valid_values:
+    if valid_values is None or value in valid_values:
         return
-    # TODO: Emit diagnostic for broken values
-    return
+    line_no, cursor_pos = pos
+    value_range = _remaining_line(lint_state, line_no, cursor_pos)
+    yield Diagnostic(
+        value_range,
+        f'Not a supported value for "{key}"',
+        DiagnosticSeverity.Error,
+        source="debputy",
+        data=DiagnosticData(
+            quickfixes=[
+                propose_correct_text_quick_fix(_as_yaml_value(m)) for m in valid_values
+            ]
+        ),
+    )
+
+
+def _as_yaml_value(v: Any) -> str:
+    if isinstance(v, bool):
+        return str(v).lower()
+    return str(v)
 
 
 def _lint_declarative_mapping_input_parser(
     lint_state: LintState,
     pg: ParserGenerator,
     parser: DeclarativeMappingInputParser,
+    debputy_integration_mode: Optional[DebputyIntegrationMode],
     content: Any,
 ) -> Iterable["Diagnostic"]:
     if not isinstance(content, CommentedMap):
@@ -363,7 +431,10 @@ def _lint_declarative_mapping_input_parser(
             lint_state,
             attr,
             pg,
+            debputy_integration_mode,
+            key,
             value,
+            lc.value(key),
         )
 
         for forbidden_key in attr.conflicting_attributes:
@@ -405,6 +476,7 @@ def _lint_content(
     lint_state: LintState,
     pg: ParserGenerator,
     parser: DeclarativeInputParser[Any],
+    debputy_integration_mode: Optional[DebputyIntegrationMode],
     content: Any,
 ) -> Iterable["Diagnostic"]:
     if isinstance(parser, DispatchingParserBase):
@@ -413,8 +485,9 @@ def _lint_content(
         lc = content.lc
         for key, value in content.items():
             is_known = parser.is_known_keyword(key)
+            line, col = lc.key(key)
+            orig_key = key
             if not is_known:
-                line, col = lc.key(key)
                 diag, corrected_key = _unknown_key(
                     key,
                     parser.registered_keywords(),
@@ -431,10 +504,20 @@ def _lint_content(
             if is_known:
                 subparser = parser.parser_for(key)
                 assert subparser is not None
+                yield from _integration_mode_allows_key(
+                    debputy_integration_mode,
+                    subparser.parser.expected_debputy_integration_mode,
+                    orig_key,
+                    line,
+                    col,
+                    lint_state.lines,
+                    lint_state.position_codec,
+                )
                 yield from _lint_content(
                     lint_state,
                     pg,
                     subparser.parser,
+                    debputy_integration_mode,
                     value,
                 )
     elif isinstance(parser, ListWrappedDeclarativeInputParser):
@@ -442,11 +525,12 @@ def _lint_content(
             return
         subparser = parser.delegate
         for value in content:
-            yield from _lint_content(lint_state, pg, subparser, value)
+            yield from _lint_content(
+                lint_state, pg, subparser, debputy_integration_mode, value
+            )
     elif isinstance(parser, InPackageContextParser):
         if not isinstance(content, CommentedMap):
             return
-        print(lint_state)
         known_packages = lint_state.binary_packages
         lc = content.lc
         for k, v in content.items():
@@ -462,36 +546,21 @@ def _lint_content(
                     message_format='Unknown package "{key}".',
                 )
                 yield diag
-            yield from _lint_content(lint_state, pg, parser.delegate, v)
+            yield from _lint_content(
+                lint_state,
+                pg,
+                parser.delegate,
+                debputy_integration_mode,
+                v,
+            )
     elif isinstance(parser, DeclarativeMappingInputParser):
         yield from _lint_declarative_mapping_input_parser(
             lint_state,
             pg,
             parser,
+            debputy_integration_mode,
             content,
         )
-
-
-def is_at(position: Position, lc_pos: Tuple[int, int]) -> bool:
-    return position.line == lc_pos[0] and position.character == lc_pos[1]
-
-
-def is_before(position: Position, lc_pos: Tuple[int, int]) -> bool:
-    line, column = lc_pos
-    if position.line < line:
-        return True
-    if position.line == line and position.character < column:
-        return True
-    return False
-
-
-def is_after(position: Position, lc_pos: Tuple[int, int]) -> bool:
-    line, column = lc_pos
-    if position.line > line:
-        return True
-    if position.line == line and position.character > column:
-        return True
-    return False
 
 
 def _trace_cursor(
@@ -626,57 +695,7 @@ def resolve_keyword(
     return None
 
 
-def _render_param_doc(
-    rule_name: str,
-    declarative_parser: DeclarativeMappingInputParser,
-    plugin_metadata: DebputyPluginMetadata,
-    attribute: str,
-) -> Optional[str]:
-    attr = declarative_parser.source_attributes.get(attribute)
-    if attr is None:
-        return None
-
-    doc_args, parser_doc = doc_args_for_parser_doc(
-        rule_name,
-        declarative_parser,
-        plugin_metadata,
-    )
-    rendered_docs = render_attribute_doc(
-        declarative_parser,
-        declarative_parser.source_attributes,
-        declarative_parser.input_time_required_parameters,
-        declarative_parser.at_least_one_of,
-        parser_doc,
-        doc_args,
-        is_interactive=True,
-        rule_name=rule_name,
-    )
-
-    for attributes, rendered_doc in rendered_docs:
-        if attribute in attributes:
-            full_doc = [
-                f"# Attribute `{attribute}`",
-                "",
-            ]
-            full_doc.extend(rendered_doc)
-
-            return "\n".join(full_doc)
-    return None
-
-
 DEBPUTY_PLUGIN_METADATA = plugin_metadata_for_debputys_own_plugin()
-
-
-def _guess_rule_name(segments: List[Union[str, int]], idx: int) -> str:
-    orig_idx = idx
-    idx -= 1
-    while idx >= 0:
-        segment = segments[idx]
-        if isinstance(segment, str):
-            return segment
-        idx -= 1
-    _warn(f"Unable to derive rule name from {segments} [{orig_idx}]")
-    return "<Bug: unknown rule name>"
 
 
 def _escape(v: str) -> str:
@@ -695,28 +714,48 @@ def _insert_snippet(lines: List[str], server_position: Position) -> bool:
     lhs = lhs_ws.strip()
     if lhs.endswith(":"):
         _info("Insertion of value (key seen)")
-        new_line = line[: server_position.character] + _COMPLETION_HINT_VALUE
+        new_line = line[: server_position.character] + _COMPLETION_HINT_VALUE + "\n"
     elif lhs.startswith("-"):
         _info("Insertion of key or value (list item)")
         # Respect the provided indentation
         snippet = _COMPLETION_HINT_KEY if ":" not in lhs else _COMPLETION_HINT_VALUE
-        new_line = line[: server_position.character] + snippet
+        new_line = line[: server_position.character] + snippet + "\n"
     elif not lhs or (lhs_ws and not lhs_ws[0].isspace()):
         _info(f"Insertion of key or value: {_escape(line[server_position.character:])}")
         # Respect the provided indentation
         snippet = _COMPLETION_HINT_KEY if ":" not in lhs else _COMPLETION_HINT_VALUE
-        new_line = line[: server_position.character] + snippet
+        new_line = line[: server_position.character] + snippet + "\n"
     elif lhs.isalpha() and ":" not in lhs:
         _info(f"Expanding value to a key: {_escape(line[server_position.character:])}")
         # Respect the provided indentation
-        new_line = line[: server_position.character] + _COMPLETION_HINT_KEY
+        new_line = line[: server_position.character] + _COMPLETION_HINT_KEY + "\n"
     else:
-        c = line[server_position.character]
+        c = (
+            line[server_position.character]
+            if server_position.character < len(line)
+            else "(OOB)"
+        )
         _info(f"Not touching line: {_escape(line)} -- {_escape(c)}")
         return False
     _info(f'Evaluating complete on synthetic line: "{new_line}"')
     lines[line_no] = new_line
     return True
+
+
+def _maybe_quote(v: str) -> str:
+    if v and v[0].isdigit():
+        try:
+            float(v)
+            return f"'{v}'"
+        except ValueError:
+            pass
+    return v
+
+
+def _complete_value(v: Any) -> str:
+    if isinstance(v, str):
+        return _maybe_quote(v)
+    return str(v)
 
 
 @lsp_completer(_LANGUAGE_IDS)
@@ -725,13 +764,12 @@ def debputy_manifest_completer(
     params: CompletionParams,
 ) -> Optional[Union[CompletionList, Sequence[CompletionItem]]]:
     doc = ls.workspace.get_text_document(params.text_document.uri)
-    if not is_valid_file(doc.path):
-        return None
     lines = doc.lines
     server_position = doc.position_codec.position_from_client_units(
         lines, params.position
     )
-    attribute_root_path = AttributePath.root_path()
+    orig_line = lines[server_position.line].rstrip()
+    has_colon = ":" in orig_line
     added_key = _insert_snippet(lines, server_position)
     attempts = 1 if added_key else 2
     content = None
@@ -768,6 +806,7 @@ def debputy_manifest_completer(
         context = lines[server_position.line].replace("\n", "\\n")
         _info(f"Completion failed: parse error: Line in question: {context}")
         return None
+    attribute_root_path = AttributePath.root_path(content)
     m = _trace_cursor(content, attribute_root_path, server_position)
 
     if m is None:
@@ -797,7 +836,9 @@ def debputy_manifest_completer(
         if isinstance(parser, DispatchingParserBase):
             if matched_key:
                 items = [
-                    CompletionItem(f"{k}:")
+                    CompletionItem(
+                        _maybe_quote(k) if has_colon else f"{_maybe_quote(k)}:"
+                    )
                     for k in parser.registered_keywords()
                     if k not in parent
                     and not isinstance(
@@ -807,7 +848,7 @@ def debputy_manifest_completer(
                 ]
             else:
                 items = [
-                    CompletionItem(k)
+                    CompletionItem(_maybe_quote(k))
                     for k in parser.registered_keywords()
                     if k not in parent
                     and isinstance(
@@ -819,7 +860,11 @@ def debputy_manifest_completer(
             binary_packages = ls.lint_state(doc).binary_packages
             if binary_packages is not None:
                 items = [
-                    CompletionItem(f"{p}:") for p in binary_packages if p not in parent
+                    CompletionItem(
+                        _maybe_quote(p) if has_colon else f"{_maybe_quote(p)}:"
+                    )
+                    for p in binary_packages
+                    if p not in parent
                 ]
         elif isinstance(parser, DeclarativeMappingInputParser):
             if matched_key:
@@ -833,7 +878,9 @@ def debputy_manifest_completer(
                         locked.add(attr_name)
                         break
                 items = [
-                    CompletionItem(f"{k}:")
+                    CompletionItem(
+                        _maybe_quote(k) if has_colon else f"{_maybe_quote(k)}:"
+                    )
                     for k in parser.manifest_attributes
                     if k not in locked
                 ]
@@ -867,10 +914,17 @@ def _completion_from_attr(
     pg: ParserGenerator,
     matched: Any,
 ) -> Optional[Union[CompletionList, Sequence[CompletionItem]]]:
-    orig = get_origin(attr.attribute_type)
+    type_mapping = pg.get_mapped_type_from_target_type(attr.attribute_type)
+    if type_mapping is not None:
+        attr_type = type_mapping.source_type
+    else:
+        attr_type = attr.attribute_type
+
+    orig = get_origin(attr_type)
     valid_values: Sequence[Any] = tuple()
+
     if orig == Literal:
-        valid_values = get_args(attr.attribute_type)
+        valid_values = get_args(attr_type)
     elif orig == bool or attr.attribute_type == bool:
         valid_values = ("true", "false")
     elif isinstance(orig, type) and issubclass(orig, DebputyDispatchableType):
@@ -881,7 +935,7 @@ def _completion_from_attr(
         _info(f"Already filled: {matched} is one of {valid_values}")
         return None
     if valid_values:
-        return [CompletionItem(x) for x in valid_values]
+        return [CompletionItem(_complete_value(x)) for x in valid_values]
     return None
 
 
@@ -891,17 +945,15 @@ def debputy_manifest_hover(
     params: HoverParams,
 ) -> Optional[Hover]:
     doc = ls.workspace.get_text_document(params.text_document.uri)
-    if not is_valid_file(doc.path):
-        return None
     lines = doc.lines
     position_codec = doc.position_codec
-    attribute_root_path = AttributePath.root_path()
     server_position = position_codec.position_from_client_units(lines, params.position)
 
     try:
         content = MANIFEST_YAML.load("".join(lines))
     except YAMLError:
         return None
+    attribute_root_path = AttributePath.root_path(content)
     m = _trace_cursor(content, attribute_root_path, server_position)
     if m is None:
         _info("No match")
@@ -922,7 +974,7 @@ def debputy_manifest_hover(
     )
     if km is None:
         _info("No keyword match")
-        return
+        return None
     parser, plugin_metadata, at_depth_idx = km
     _info(f"Match leaf parser {at_depth_idx}/{len(segments)} -- {parser.__class__}")
     hover_doc_text = resolve_hover_text(
@@ -934,105 +986,4 @@ def debputy_manifest_hover(
         matched,
         matched_key,
     )
-    return _hover_doc(ls, hover_doc_text)
-
-
-def resolve_hover_text_for_value(
-    feature_set: PluginProvidedFeatureSet,
-    parser: DeclarativeMappingInputParser,
-    plugin_metadata: DebputyPluginMetadata,
-    segment: Union[str, int],
-    matched: Any,
-) -> Optional[str]:
-
-    hover_doc_text: Optional[str] = None
-    attr = parser.manifest_attributes.get(segment)
-    attr_type = attr.attribute_type if attr is not None else None
-    if attr_type is None:
-        _info(f"Matched value for {segment} -- No attr or type")
-        return None
-    if isinstance(attr_type, type) and issubclass(attr_type, DebputyDispatchableType):
-        parser_generator = feature_set.manifest_parser_generator
-        parser = parser_generator.dispatch_parser_table_for(attr_type)
-        if parser is None or not isinstance(matched, str):
-            _info(
-                f"Unknown parser for {segment} or matched is not a str -- {attr_type} {type(matched)=}"
-            )
-            return None
-        subparser = parser.parser_for(matched)
-        if subparser is None:
-            _info(f"Unknown parser for {matched} (subparser)")
-            return None
-        hover_doc_text = render_rule(
-            matched,
-            subparser.parser,
-            plugin_metadata,
-        )
-    else:
-        _info(f"Unknown value: {matched} -- {segment}")
-    return hover_doc_text
-
-
-def resolve_hover_text(
-    feature_set: PluginProvidedFeatureSet,
-    parser: Optional[Union[DeclarativeInputParser[Any], DispatchingParserBase]],
-    plugin_metadata: DebputyPluginMetadata,
-    segments: List[Union[str, int]],
-    at_depth_idx: int,
-    matched: Any,
-    matched_key: bool,
-) -> Optional[str]:
-    hover_doc_text: Optional[str] = None
-    if at_depth_idx == len(segments):
-        segment = segments[at_depth_idx - 1]
-        _info(f"Matched {segment} at ==, {matched_key=} ")
-        hover_doc_text = render_rule(
-            segment,
-            parser,
-            plugin_metadata,
-            is_root_rule=False,
-        )
-    elif at_depth_idx + 1 == len(segments) and isinstance(
-        parser, DeclarativeMappingInputParser
-    ):
-        segment = segments[at_depth_idx]
-        _info(f"Matched {segment} at -1, {matched_key=} ")
-        if isinstance(segment, str):
-            if not matched_key:
-                hover_doc_text = resolve_hover_text_for_value(
-                    feature_set,
-                    parser,
-                    plugin_metadata,
-                    segment,
-                    matched,
-                )
-            if matched_key or hover_doc_text is None:
-                rule_name = _guess_rule_name(segments, at_depth_idx)
-                hover_doc_text = _render_param_doc(
-                    rule_name,
-                    parser,
-                    plugin_metadata,
-                    segment,
-                )
-    else:
-        _info(f"No doc: {at_depth_idx=} {len(segments)=}")
-
-    return hover_doc_text
-
-
-def _hover_doc(ls: "LanguageServer", hover_doc_text: Optional[str]) -> Optional[Hover]:
-    if hover_doc_text is None:
-        return None
-    try:
-        supported_formats = ls.client_capabilities.text_document.hover.content_format
-    except AttributeError:
-        supported_formats = []
-    markup_kind = MarkupKind.Markdown
-    if markup_kind not in supported_formats:
-        markup_kind = MarkupKind.PlainText
-    return Hover(
-        contents=MarkupContent(
-            kind=markup_kind,
-            value=hover_doc_text,
-        ),
-    )
+    return as_hover_doc(ls, hover_doc_text)

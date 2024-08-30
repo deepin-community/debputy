@@ -52,9 +52,7 @@ class Position:
         >>> parent: Locatable = ...                   # doctest: +SKIP
         >>> children: Iterable[Locatable] = ...       # doctest: +SKIP
         >>> # This will expensive
-        >>> parent_pos = parent.position_in_file(     # doctest: +SKIP
-        ...    skip_leading_comments=False
-        ... )
+        >>> parent_pos = parent.position_in_file()     # doctest: +SKIP
         >>> for child in children:                    # doctest: +SKIP
         ...    child_pos = child.position_in_parent()
         ...    # Avoid a position_in_file() for each child
@@ -181,9 +179,7 @@ class Range:
         >>> parent: Locatable = ...                   # doctest: +SKIP
         >>> children: Iterable[Locatable] = ...       # doctest: +SKIP
         >>> # This will expensive
-        >>> parent_pos = parent.position_in_file(     # doctest: +SKIP
-        ...    skip_leading_comments=False
-        ... )
+        >>> parent_pos = parent.position_in_file()     # doctest: +SKIP
         >>> for child in children:                    # doctest: +SKIP
         ...    child_range = child.range_in_parent()
         ...    # Avoid a position_in_file() for each child
@@ -312,26 +308,12 @@ class Locatable:
         # type: () -> Optional[Deb822Element]
         raise NotImplementedError
 
-    def position_in_parent(self, *, skip_leading_comments: bool = True) -> Position:
+    def position_in_parent(self) -> Position:
         """The start position of this token/element inside its parent
 
         This is operation is generally linear to the number of "parts" (elements/tokens)
         inside the parent.
-
-        :param skip_leading_comments: If True, then if any leading comment that
-          that can be skipped will be excluded in the position of this locatable.
-          This is useful if you want the position "semantic" content of a field
-          without also highlighting a leading comment. Remember to align this
-          parameter with the `size` call, so the range does not "overshoot"
-          into the next element (or falls short and only covers part of an
-          element). Note that this option can only be used to filter out leading
-          comments when the comments are a subset of the element. It has no
-          effect on elements that are entirely made of comments.
         """
-        # pylint: disable=unused-argument
-        # Note: The base class makes no assumptions about what tokens can be skipped,
-        # therefore, skip_leading_comments is unused here. However, I do not want the
-        # API to differ between elements and tokens.
 
         parent = self.parent_element
         if parent is None:
@@ -343,32 +325,23 @@ class Locatable:
         )
         span = Range.from_position_and_sizes(
             START_POSITION,
-            (x.size(skip_leading_comments=False) for x in relevant_parts),
+            (x.size() for x in relevant_parts),
         )
         return span.end_pos
 
-    def range_in_parent(self, *, skip_leading_comments: bool = True) -> Range:
+    def range_in_parent(self) -> Range:
         """The range of this token/element inside its parent
 
         This is operation is generally linear to the number of "parts" (elements/tokens)
         inside the parent.
-
-        :param skip_leading_comments: If True, then if any leading comment that
-          that can be skipped will be excluded in the position of this locatable.
-          This is useful if you want the position "semantic" content of a field
-          without also highlighting a leading comment. Remember to align this
-          parameter with the `size` call, so the range does not "overshoot"
-          into the next element (or falls short and only covers part of an
-          element). Note that this option can only be used to filter out leading
-          comments when the comments are a subset of the element. It has no
-          effect on elements that are entirely made of comments.
         """
-        pos = self.position_in_parent(skip_leading_comments=skip_leading_comments)
+        pos = self.position_in_parent()
         return Range.from_position_and_size(
-            pos, self.size(skip_leading_comments=skip_leading_comments)
+            pos,
+            self.size(),
         )
 
-    def position_in_file(self, *, skip_leading_comments: bool = True) -> Position:
+    def position_in_file(self) -> Position:
         """The start position of this token/element in this file
 
         This is an *expensive* operation and in many cases have to traverse
@@ -377,37 +350,14 @@ class Locatable:
         `position_in_parent()` combined with
         `child_position.relative_to(parent_position)`
 
-        :param skip_leading_comments: If True, then if any leading comment that
-          that can be skipped will be excluded in the position of this locatable.
-          This is useful if you want the position "semantic" content of a field
-          without also highlighting a leading comment. Remember to align this
-          parameter with the `size` call, so the range does not "overshoot"
-          into the next element (or falls short and only covers part of an
-          element). Note that this option can only be used to filter out leading
-          comments when the comments are a subset of the element. It has no
-          effect on elements that are entirely made of comments.
         """
-        position = self.position_in_parent(
-            skip_leading_comments=skip_leading_comments,
-        )
+        position = self.position_in_parent()
         parent = self.parent_element
         if parent is not None:
-            parent_position = parent.position_in_file(skip_leading_comments=False)
+            parent_position = parent.position_in_file()
             position = position.relative_to(parent_position)
         return position
 
-    def size(self, *, skip_leading_comments: bool = True) -> Range:
-        """Describe the objects size as a continuous range
-
-        :param skip_leading_comments: If True, then if any leading comment that
-          that can be skipped will be excluded in the position of this locatable.
-          This is useful if you want the position "semantic" content of a field
-          without also highlighting a leading comment. Remember to align this
-          parameter with the `position_in_file` or `position_in_parent` call,
-          so the range does not "overshoot" into the next element (or falls
-          short and only covers part of an element).  Note that this option can
-          only be used to filter out leading comments when the comments are a
-          subset of the element. It has no effect on elements that are entirely
-          made of comments.
-        """
+    def size(self) -> Range:
+        """Describe the objects size as a continuous range"""
         raise NotImplementedError

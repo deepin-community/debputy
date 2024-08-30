@@ -1,21 +1,14 @@
 import textwrap
 
+from debputy.lsprotocol.types import (
+    CompletionParams,
+    TextDocumentIdentifier,
+)
 from lsp_tests.lsp_tutil import put_doc_with_cursor
 
 try:
     from pygls.server import LanguageServer
-    from lsprotocol.types import (
-        InitializeParams,
-        ClientCapabilities,
-        GeneralClientCapabilities,
-        PositionEncodingKind,
-        TextDocumentItem,
-        Position,
-        CompletionParams,
-        TextDocumentIdentifier,
-        HoverParams,
-        MarkupContent,
-    )
+
     from debputy.lsp.lsp_debian_debputy_manifest import debputy_manifest_completer
     from debputy.lsp.debputy_ls import DebputyLanguageServer
 
@@ -207,7 +200,7 @@ def test_basic_debputy_completer_manifest_variable_value(
     )
     assert isinstance(completions, list)
     keywords = {m.label for m in completions}
-    assert "0.1" in keywords
+    assert "'0.1'" in keywords
 
     cursor_pos = put_doc_with_cursor(
         ls,
@@ -226,7 +219,7 @@ def test_basic_debputy_completer_manifest_variable_value(
     )
     assert isinstance(completions, list)
     keywords = {m.label for m in completions}
-    assert "0.1" in keywords
+    assert "'0.1'" in keywords
 
 
 def test_basic_debputy_completer_install_rule_dispatch_key(
@@ -597,3 +590,52 @@ def test_basic_debputy_completer_manifest_conditions(
     assert "not:" in keywords
     # str-only forms are not applicable here
     assert "cross-compiling" not in keywords
+
+
+def test_basic_debputy_completer_mid_doc(ls: "DebputyLanguageServer") -> None:
+    debputy_manifest_uri = "file:///nowhere/debian/debputy.manifest"
+    cursor_pos = put_doc_with_cursor(
+        ls,
+        debputy_manifest_uri,
+        "debian/debputy.manifest",
+        textwrap.dedent(
+            """\
+        manifest-version: 0.1
+        installations:
+        - install-docs:
+            s<CURSOR>
+            - foo
+"""
+        ),
+    )
+
+    completions = debputy_manifest_completer(
+        ls,
+        CompletionParams(TextDocumentIdentifier(debputy_manifest_uri), cursor_pos),
+    )
+    assert isinstance(completions, list)
+    keywords = {m.label for m in completions}
+    assert "sources:" in keywords
+
+    cursor_pos = put_doc_with_cursor(
+        ls,
+        debputy_manifest_uri,
+        "debian/debputy.manifest",
+        textwrap.dedent(
+            """\
+        manifest-version: 0.1
+        installations:
+        - install-docs:
+            s<CURSOR>:
+            - foo
+"""
+        ),
+    )
+
+    completions = debputy_manifest_completer(
+        ls,
+        CompletionParams(TextDocumentIdentifier(debputy_manifest_uri), cursor_pos),
+    )
+    assert isinstance(completions, list)
+    keywords = {m.label for m in completions}
+    assert "sources" in keywords

@@ -1,9 +1,9 @@
 #!/usr/bin/python3 -B
 import argparse
 import json
+import logging
 import os
 import shutil
-import stat
 import subprocess
 import sys
 import textwrap
@@ -12,34 +12,28 @@ from tempfile import TemporaryDirectory
 from typing import (
     List,
     Dict,
-    Iterable,
     Any,
     Tuple,
-    Sequence,
     Optional,
     NoReturn,
-    Mapping,
-    Union,
     NamedTuple,
     Literal,
-    Set,
-    Iterator,
-    TypedDict,
-    NotRequired,
     cast,
 )
 
 from debputy import DEBPUTY_ROOT_DIR, DEBPUTY_PLUGIN_ROOT_DIR
+from debputy._deb_options_profiles import DebBuildOptionsAndProfiles
+from debputy.analysis import REFERENCE_DATA_TABLE
+from debputy.analysis.debian_dir import scan_debian_dir
+from debputy.build_support import perform_clean, perform_builds
 from debputy.commands.debputy_cmd.context import (
     CommandContext,
     add_arg,
     ROOT_COMMAND,
     CommandArg,
 )
-from debputy.commands.debputy_cmd.dc_util import flatten_ppfs
-from debputy.commands.debputy_cmd.output import _stream_to_pager
+from debputy.commands.debputy_cmd.output import _stream_to_pager, _output_styling
 from debputy.dh_migration.migrators import MIGRATORS
-from debputy.dh_migration.migrators_impl import read_dh_addon_sequences
 from debputy.exceptions import (
     DebputyRuntimeError,
     PluginNotFoundError,
@@ -48,16 +42,14 @@ from debputy.exceptions import (
     UnhandledOrUnexpectedErrorFromPluginError,
     SymlinkLoopError,
 )
+from debputy.highlevel_manifest import HighLevelManifest
 from debputy.package_build.assemble_deb import (
     assemble_debs,
 )
-from debputy.packager_provided_files import (
-    detect_all_packager_provided_files,
-    PackagerProvidedFile,
-)
 from debputy.plugin.api.spec import (
-    VirtualPath,
-    packager_provided_file_reference_documentation,
+    INTEGRATION_MODE_DH_DEBPUTY_RRR,
+    DebputyIntegrationMode,
+    INTEGRATION_MODE_FULL,
 )
 
 try:
@@ -71,28 +63,20 @@ except ImportError:
 from debputy.version import __version__
 from debputy.filesystem_scan import (
     FSROOverlay,
+    FSRootDir,
 )
 from debputy.plugin.api.impl_types import (
-    PackagerProvidedFileClassSpec,
     DebputyPluginMetadata,
-    PluginProvidedKnownPackagingFile,
-    KNOWN_PACKAGING_FILE_CATEGORY_DESCRIPTIONS,
-    KNOWN_PACKAGING_FILE_CONFIG_FEATURE_DESCRIPTION,
-    expand_known_packaging_config_features,
-    InstallPatternDHCompatRule,
-    KnownPackagingFileInfo,
 )
 from debputy.plugin.api.impl import (
     find_json_plugin,
     find_tests_for_plugin,
     find_related_implementation_files_for_plugin,
     parse_json_plugin_desc,
-    plugin_metadata_for_debputys_own_plugin,
 )
-from debputy.dh_migration.migration import migrate_from_dh
+from debputy.dh_migration.migration import migrate_from_dh, _check_migration_target
 from debputy.dh_migration.models import AcceptableMigrationIssues
-from debputy.packages import BinaryPackage
-from debputy.debhelper_emulation import (
+from debputy.dh.debhelper_emulation import (
     dhe_pkgdir,
 )
 
@@ -115,13 +99,10 @@ from debputy.util import (
     escape_shell,
     program_name,
     integrated_with_debhelper,
-    assume_not_none,
+    PRINT_BUILD_SYSTEM_COMMAND,
+    PRINT_COMMAND,
+    change_log_level,
 )
-
-REFERENCE_DATA_TABLE = {
-    "config-features": KNOWN_PACKAGING_FILE_CONFIG_FEATURE_DESCRIPTION,
-    "file-categories": KNOWN_PACKAGING_FILE_CATEGORY_DESCRIPTIONS,
-}
 
 
 class SharedArgument(NamedTuple):
@@ -282,6 +263,18 @@ def _add_packages_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _build_subcommand_log_level(context: CommandContext) -> int:
+    parsed_args = context.parsed_args
+    log_level: Optional[int] = None
+    if os.environ.get("DH_VERBOSE", "") != "":
+        log_level = PRINT_COMMAND
+    if parsed_args.debug_mode:
+        log_level = logging.INFO
+    if log_level is not None:
+        change_log_level(log_level)
+    return PRINT_BUILD_SYSTEM_COMMAND
+
+
 internal_commands = ROOT_COMMAND.add_dispatching_subcommand(
     "internal-command",
     dest="internal_command",
@@ -357,7 +350,6 @@ def parse_args() -> argparse.Namespace:
 )
 def _check_manifest(context: CommandContext) -> None:
     context.parse_manifest()
-    _info("No errors detected.")
 
 
 def _install_plugin_from_plugin_metadata(
@@ -658,17 +650,73 @@ def _run_tests_for_plugin(context: CommandContext) -> None:
 
 
 @internal_commands.register_subcommand(
+    "dpkg-build-driver-run-task",
+    help_description="[Internal command] Perform a given Dpkg::BuildDriver task (Not stable API)",
+    requested_plugins_only=True,
+    default_log_level=_build_subcommand_log_level,
+    argparser=[
+        add_arg(
+            "task_name",
+            metavar="task-name",
+            choices=[
+                "clean",
+                "build",
+                "build-arch",
+                "build-indep",
+                "binary",
+                "binary-arch",
+                "binary-indep",
+            ],
+            help="The task to run",
+        ),
+        add_arg(
+            "output",
+            nargs="?",
+            default="..",
+            metavar="output",
+            help="Where to place the resulting packages. Should be a directory",
+        ),
+    ],
+)
+def _dpkg_build_driver_integration(context: CommandContext) -> None:
+    parsed_args = context.parsed_args
+    log_level = context.set_log_level_for_build_subcommand()
+    task_name = parsed_args.task_name
+
+    if task_name.endswith("-indep"):
+        context.package_set = "indep"
+    elif task_name.endswith("arch"):
+        context.package_set = "arch"
+
+    manifest = context.parse_manifest()
+
+    plugins = context.load_plugins().plugin_data
+    for plugin in plugins.values():
+        if not plugin.is_bundled:
+            _info(f"Loaded plugin {plugin.plugin_name}")
+    if task_name == "clean":
+        perform_clean(context, manifest)
+    elif task_name in ("build", "build-indep", "build-arch"):
+        perform_builds(context, manifest)
+    elif task_name in ("binary", "binary-indep", "binary-arch"):
+        perform_builds(context, manifest)
+        assemble(
+            context,
+            manifest,
+            INTEGRATION_MODE_FULL,
+            debug_materialization=log_level is not None,
+        )
+    else:
+        _error(f"Unsupported Dpkg::BuildDriver task: {task_name}.")
+
+
+@internal_commands.register_subcommand(
     "dh-integration-generate-debs",
     help_description="[Internal command] Generate .deb/.udebs packages from debian/<pkg> (Not stable API)",
     requested_plugins_only=True,
+    default_log_level=_build_subcommand_log_level,
     argparser=[
         _add_packages_args,
-        add_arg(
-            "--integration-mode",
-            dest="integration_mode",
-            default=None,
-            choices=["rrr"],
-        ),
         add_arg(
             "output",
             metavar="output",
@@ -686,8 +734,9 @@ def _run_tests_for_plugin(context: CommandContext) -> None:
 )
 def _dh_integration_generate_debs(context: CommandContext) -> None:
     integrated_with_debhelper()
-    parsed_args = context.parsed_args
-    is_dh_rrr_only_mode = parsed_args.integration_mode == "rrr"
+    log_level = context.set_log_level_for_build_subcommand()
+    integration_mode = context.resolve_integration_mode()
+    is_dh_rrr_only_mode = integration_mode == INTEGRATION_MODE_DH_DEBPUTY_RRR
     if is_dh_rrr_only_mode:
         problematic_plugins = list(context.requested_plugins())
         problematic_plugins.extend(context.required_plugins())
@@ -699,16 +748,30 @@ def _dh_integration_generate_debs(context: CommandContext) -> None:
 
     plugins = context.load_plugins().plugin_data
     for plugin in plugins.values():
-        _info(f"Loaded plugin {plugin.plugin_name}")
+        if not plugin.is_bundled:
+            _info(f"Loaded plugin {plugin.plugin_name}")
     manifest = context.parse_manifest()
 
-    package_data_table = manifest.perform_installations(
-        enable_manifest_installation_feature=not is_dh_rrr_only_mode
+    assemble(
+        context,
+        manifest,
+        integration_mode,
+        debug_materialization=log_level is not None,
     )
+
+
+def assemble(
+    context: CommandContext,
+    manifest: HighLevelManifest,
+    integration_mode: DebputyIntegrationMode,
+    *,
+    debug_materialization: bool = False,
+) -> None:
     source_fs = FSROOverlay.create_root_dir("..", ".")
     source_version = manifest.source_version()
     is_native = "-" not in source_version
-
+    is_dh_rrr_only_mode = integration_mode == INTEGRATION_MODE_DH_DEBPUTY_RRR
+    package_data_table = manifest.perform_installations(integration_mode)
     if not is_dh_rrr_only_mode:
         for dctrl_bin in manifest.active_packages:
             package = dctrl_bin.name
@@ -726,7 +789,7 @@ def _dh_integration_generate_debs(context: CommandContext) -> None:
                 fs_root,
                 dctrl_data.substvars,
             )
-            if "nostrip" not in manifest.build_env.deb_build_options:
+            if "nostrip" not in manifest.deb_options_and_profiles.deb_build_options:
                 dbgsym_ids = relocate_dwarves_into_dbgsym_packages(
                     dctrl_bin,
                     fs_root,
@@ -738,7 +801,7 @@ def _dh_integration_generate_debs(context: CommandContext) -> None:
                 dctrl_bin,
                 fs_root,
                 is_native,
-                manifest.build_env,
+                manifest.deb_options_and_profiles,
             )
             if not is_native:
                 install_upstream_changelog(
@@ -754,7 +817,8 @@ def _dh_integration_generate_debs(context: CommandContext) -> None:
             continue
         # Ensure all fs's are read-only before we enable cross package checks.
         # This ensures that no metadata detector will never see a read-write FS
-        cast("FSRootDir", binary_data.fs_root).is_read_write = False
+        pkg_fs_root: "FSRootDir" = cast("FSRootDir", binary_data.fs_root)
+        pkg_fs_root.is_read_write = False
 
     package_data_table.enable_cross_package_checks = True
     assemble_debs(
@@ -762,342 +826,8 @@ def _dh_integration_generate_debs(context: CommandContext) -> None:
         manifest,
         package_data_table,
         is_dh_rrr_only_mode,
+        debug_materialization=debug_materialization,
     )
-
-
-PackagingFileInfo = TypedDict(
-    "PackagingFileInfo",
-    {
-        "path": str,
-        "binary-package": NotRequired[str],
-        "install-path": NotRequired[str],
-        "install-pattern": NotRequired[str],
-        "file-categories": NotRequired[List[str]],
-        "config-features": NotRequired[List[str]],
-        "likely-generated-from": NotRequired[List[str]],
-        "related-tools": NotRequired[List[str]],
-        "documentation-uris": NotRequired[List[str]],
-        "debputy-cmd-templates": NotRequired[List[List[str]]],
-        "generates": NotRequired[str],
-        "generated-from": NotRequired[str],
-    },
-)
-
-
-def _scan_debian_dir(debian_dir: VirtualPath) -> Iterator[VirtualPath]:
-    for p in debian_dir.iterdir:
-        yield p
-        if p.is_dir and p.path in ("debian/source", "debian/tests"):
-            yield from p.iterdir
-
-
-_POST_FORMATTING_REWRITE = {
-    "period-to-underscore": lambda n: n.replace(".", "_"),
-}
-
-
-def _fake_PPFClassSpec(
-    debputy_plugin_metadata: DebputyPluginMetadata,
-    stem: str,
-    doc_uris: Sequence[str],
-    install_pattern: Optional[str],
-    *,
-    default_priority: Optional[int] = None,
-    packageless_is_fallback_for_all_packages: bool = False,
-    post_formatting_rewrite: Optional[str] = None,
-    bug_950723: bool = False,
-) -> PackagerProvidedFileClassSpec:
-    if install_pattern is None:
-        install_pattern = "not-a-real-ppf"
-    if post_formatting_rewrite is not None:
-        formatting_hook = _POST_FORMATTING_REWRITE[post_formatting_rewrite]
-    else:
-        formatting_hook = None
-    return PackagerProvidedFileClassSpec(
-        debputy_plugin_metadata,
-        stem,
-        install_pattern,
-        allow_architecture_segment=True,
-        allow_name_segment=True,
-        default_priority=default_priority,
-        default_mode=0o644,
-        post_formatting_rewrite=formatting_hook,
-        packageless_is_fallback_for_all_packages=packageless_is_fallback_for_all_packages,
-        reservation_only=False,
-        formatting_callback=None,
-        bug_950723=bug_950723,
-        reference_documentation=packager_provided_file_reference_documentation(
-            format_documentation_uris=doc_uris,
-        ),
-    )
-
-
-def _relevant_dh_compat_rules(
-    compat_level: Optional[int],
-    info: KnownPackagingFileInfo,
-) -> Iterable[InstallPatternDHCompatRule]:
-    if compat_level is None:
-        return
-    dh_compat_rules = info.get("dh_compat_rules")
-    if not dh_compat_rules:
-        return
-    for dh_compat_rule in dh_compat_rules:
-        rule_compat_level = dh_compat_rule.get("starting_with_compat_level")
-        if rule_compat_level is not None and compat_level < rule_compat_level:
-            continue
-        yield dh_compat_rule
-
-
-def _kpf_install_pattern(
-    compat_level: Optional[int],
-    ppkpf: PluginProvidedKnownPackagingFile,
-) -> Optional[str]:
-    for compat_rule in _relevant_dh_compat_rules(compat_level, ppkpf.info):
-        install_pattern = compat_rule.get("install_pattern")
-        if install_pattern is not None:
-            return install_pattern
-    return ppkpf.info.get("install_pattern")
-
-
-def _resolve_debhelper_config_files(
-    debian_dir: VirtualPath,
-    binary_packages: Mapping[str, BinaryPackage],
-    debputy_plugin_metadata: DebputyPluginMetadata,
-    dh_ppf_docs: Dict[str, PluginProvidedKnownPackagingFile],
-    dh_rules_addons: Iterable[str],
-    dh_compat_level: int,
-) -> Tuple[List[PackagerProvidedFile], Optional[object], int]:
-    dh_ppfs = {}
-    commands, exit_code = _relevant_dh_commands(dh_rules_addons)
-    dh_commands = set(commands)
-
-    cmd = ["dh_assistant", "list-guessed-dh-config-files"]
-    if dh_rules_addons:
-        addons = ",".join(dh_rules_addons)
-        cmd.append(f"--with={addons}")
-    try:
-        output = subprocess.check_output(
-            cmd,
-            stderr=subprocess.DEVNULL,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        config_files = []
-        issues = None
-        if isinstance(e, subprocess.CalledProcessError):
-            exit_code = e.returncode
-        else:
-            exit_code = 127
-    else:
-        result = json.loads(output)
-        config_files: List[Union[Mapping[str, Any], object]] = result.get(
-            "config-files", []
-        )
-        issues = result.get("issues")
-    for config_file in config_files:
-        if not isinstance(config_file, dict):
-            continue
-        if config_file.get("file-type") != "pkgfile":
-            continue
-        stem = config_file.get("pkgfile")
-        if stem is None:
-            continue
-        internal = config_file.get("internal")
-        if isinstance(internal, dict):
-            bug_950723 = internal.get("bug#950723", False) is True
-        else:
-            bug_950723 = False
-        commands = config_file.get("commands")
-        documentation_uris = []
-        related_tools = []
-        seen_commands = set()
-        seen_docs = set()
-        ppkpf = dh_ppf_docs.get(stem)
-        if ppkpf:
-            dh_cmds = ppkpf.info.get("debhelper_commands")
-            doc_uris = ppkpf.info.get("documentation_uris")
-            default_priority = ppkpf.info.get("default_priority")
-            if doc_uris is not None:
-                seen_docs.update(doc_uris)
-                documentation_uris.extend(doc_uris)
-            if dh_cmds is not None:
-                seen_commands.update(dh_cmds)
-                related_tools.extend(dh_cmds)
-            install_pattern = _kpf_install_pattern(dh_compat_level, ppkpf)
-            post_formatting_rewrite = ppkpf.info.get("post_formatting_rewrite")
-            packageless_is_fallback_for_all_packages = ppkpf.info.get(
-                "packageless_is_fallback_for_all_packages",
-                False,
-            )
-        else:
-            install_pattern = None
-            default_priority = None
-            post_formatting_rewrite = None
-            packageless_is_fallback_for_all_packages = False
-        for command in commands:
-            if isinstance(command, dict):
-                command_name = command.get("command")
-                if isinstance(command_name, str) and command_name:
-                    if command_name not in seen_commands:
-                        related_tools.append(command_name)
-                        seen_commands.add(command_name)
-                    manpage = f"man:{command_name}(1)"
-                    if manpage not in seen_docs:
-                        documentation_uris.append(manpage)
-                        seen_docs.add(manpage)
-        dh_ppfs[stem] = _fake_PPFClassSpec(
-            debputy_plugin_metadata,
-            stem,
-            documentation_uris,
-            install_pattern,
-            default_priority=default_priority,
-            post_formatting_rewrite=post_formatting_rewrite,
-            packageless_is_fallback_for_all_packages=packageless_is_fallback_for_all_packages,
-            bug_950723=bug_950723,
-        )
-    for ppkpf in dh_ppf_docs.values():
-        stem = ppkpf.detection_value
-        if stem in dh_ppfs:
-            continue
-
-        default_priority = ppkpf.info.get("default_priority")
-        commands = ppkpf.info.get("debhelper_commands")
-        install_pattern = _kpf_install_pattern(dh_compat_level, ppkpf)
-        post_formatting_rewrite = ppkpf.info.get("post_formatting_rewrite")
-        packageless_is_fallback_for_all_packages = ppkpf.info.get(
-            "packageless_is_fallback_for_all_packages",
-            False,
-        )
-        if commands and not any(c in dh_commands for c in commands):
-            continue
-        dh_ppfs[stem] = _fake_PPFClassSpec(
-            debputy_plugin_metadata,
-            stem,
-            ppkpf.info.get("documentation_uris"),
-            install_pattern,
-            default_priority=default_priority,
-            post_formatting_rewrite=post_formatting_rewrite,
-            packageless_is_fallback_for_all_packages=packageless_is_fallback_for_all_packages,
-        )
-    dh_ppfs = list(
-        flatten_ppfs(
-            detect_all_packager_provided_files(
-                dh_ppfs,
-                debian_dir,
-                binary_packages,
-                allow_fuzzy_matches=True,
-            )
-        )
-    )
-    return dh_ppfs, issues, exit_code
-
-
-def _merge_list(
-    existing_table: Dict[str, Any],
-    key: str,
-    new_data: Optional[List[str]],
-) -> None:
-    if not new_data:
-        return
-    existing_values = existing_table.get(key, [])
-    if isinstance(existing_values, tuple):
-        existing_values = list(existing_values)
-    assert isinstance(existing_values, list)
-    seen = set(existing_values)
-    existing_values.extend(x for x in new_data if x not in seen)
-    existing_table[key] = existing_values
-
-
-def _merge_ppfs(
-    identified: List[PackagingFileInfo],
-    seen_paths: Set[str],
-    ppfs: List[PackagerProvidedFile],
-    context: Mapping[str, PluginProvidedKnownPackagingFile],
-    dh_compat_level: Optional[int],
-) -> None:
-    for ppf in ppfs:
-        key = ppf.path.path
-        ref_doc = ppf.definition.reference_documentation
-        documentation_uris = (
-            ref_doc.format_documentation_uris if ref_doc is not None else None
-        )
-
-        if not ppf.definition.installed_as_format.startswith("not-a-real-ppf"):
-            try:
-                parts = ppf.compute_dest()
-            except RuntimeError:
-                dest = None
-            else:
-                dest = "/".join(parts).lstrip(".")
-        else:
-            dest = None
-        seen_paths.add(key)
-        details: PackagingFileInfo = {
-            "path": key,
-            "binary-package": ppf.package_name,
-        }
-        if ppf.fuzzy_match and key.endswith(".in"):
-            _merge_list(details, "file-categories", ["generic-template"])
-            details["generates"] = key[:-3]
-        elif assume_not_none(ppf.path.parent_dir).get(ppf.path.name + ".in"):
-            _merge_list(details, "file-categories", ["generated"])
-            details["generated-from"] = key + ".in"
-        if dest is not None:
-            details["install-path"] = dest
-        identified.append(details)
-
-        extra_details = context.get(ppf.definition.stem)
-        if extra_details is not None:
-            _add_known_packaging_data(details, extra_details, dh_compat_level)
-
-        _merge_list(details, "documentation-uris", documentation_uris)
-
-
-def _extract_dh_compat_level() -> Tuple[Optional[int], int]:
-    try:
-        output = subprocess.check_output(
-            ["dh_assistant", "active-compat-level"],
-            stderr=subprocess.DEVNULL,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError) as e:
-        exit_code = 127
-        if isinstance(e, subprocess.CalledProcessError):
-            exit_code = e.returncode
-        return None, exit_code
-    else:
-        data = json.loads(output)
-        active_compat_level = data.get("active-compat-level")
-        exit_code = 0
-        if not isinstance(active_compat_level, int) or active_compat_level < 1:
-            active_compat_level = None
-            exit_code = 255
-        return active_compat_level, exit_code
-
-
-def _relevant_dh_commands(dh_rules_addons: Iterable[str]) -> Tuple[List[str], int]:
-    cmd = ["dh_assistant", "list-commands", "--output-format=json"]
-    if dh_rules_addons:
-        addons = ",".join(dh_rules_addons)
-        cmd.append(f"--with={addons}")
-    try:
-        output = subprocess.check_output(
-            cmd,
-            stderr=subprocess.DEVNULL,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError) as e:
-        exit_code = 127
-        if isinstance(e, subprocess.CalledProcessError):
-            exit_code = e.returncode
-        return [], exit_code
-    else:
-        data = json.loads(output)
-        commands_json = data.get("commands")
-        commands = []
-        for command in commands_json:
-            if isinstance(command, dict):
-                command_name = command.get("command")
-                if isinstance(command_name, str) and command_name:
-                    commands.append(command_name)
-        return commands, 0
 
 
 @tool_support_commands.register_subcommand(
@@ -1172,50 +902,6 @@ def _export_reference_data(context: CommandContext) -> None:
         raise AssertionError(f"Unsupported output format {output_format}")
 
 
-def _add_known_packaging_data(
-    details: PackagingFileInfo,
-    plugin_data: PluginProvidedKnownPackagingFile,
-    dh_compat_level: Optional[int],
-):
-    install_pattern = _kpf_install_pattern(
-        dh_compat_level,
-        plugin_data,
-    )
-    config_features = plugin_data.info.get("config_features")
-    if config_features:
-        config_features = expand_known_packaging_config_features(
-            dh_compat_level or 0,
-            config_features,
-        )
-        _merge_list(details, "config-features", config_features)
-
-    if dh_compat_level is not None:
-        extra_config_features = []
-        for dh_compat_rule in _relevant_dh_compat_rules(
-            dh_compat_level, plugin_data.info
-        ):
-            cf = dh_compat_rule.get("add_config_features")
-            if cf:
-                extra_config_features.extend(cf)
-        if extra_config_features:
-            extra_config_features = expand_known_packaging_config_features(
-                dh_compat_level,
-                extra_config_features,
-            )
-            _merge_list(details, "config-features", extra_config_features)
-    if "install-pattern" not in details and install_pattern is not None:
-        details["install-pattern"] = install_pattern
-    for mk, ok in [
-        ("file_categories", "file-categories"),
-        ("documentation_uris", "documentation-uris"),
-        ("debputy_cmd_templates", "debputy-cmd-templates"),
-    ]:
-        value = plugin_data.info.get(mk)
-        if value and ok == "debputy-cmd-templates":
-            value = [escape_shell(*c) for c in value]
-        _merge_list(details, ok, value)
-
-
 @tool_support_commands.register_subcommand(
     "annotate-debian-directory",
     log_only_to_stderr=True,
@@ -1227,130 +913,13 @@ def _annotate_debian_directory(context: CommandContext) -> None:
     # Validates that we are run from a debian directory as a side effect
     binary_packages = context.binary_packages()
     feature_set = context.load_plugins()
-    known_packaging_files = feature_set.known_packaging_files
-    debputy_plugin_metadata = plugin_metadata_for_debputys_own_plugin()
 
-    reference_data_set_names = [
-        "config-features",
-        "file-categories",
-    ]
-    for n in reference_data_set_names:
-        assert n in REFERENCE_DATA_TABLE
-
-    annotated: List[PackagingFileInfo] = []
-    seen_paths = set()
-
-    r = read_dh_addon_sequences(context.debian_dir)
-    if r is not None:
-        bd_sequences, dr_sequences = r
-        drules_sequences = bd_sequences | dr_sequences
-    else:
-        drules_sequences = set()
-    is_debputy_package = (
-        "debputy" in drules_sequences
-        or "zz-debputy" in drules_sequences
-        or "zz_debputy" in drules_sequences
-        or "zz-debputy-rrr" in drules_sequences
+    result = scan_debian_dir(
+        feature_set,
+        binary_packages,
+        context.debian_dir,
     )
-    dh_compat_level, dh_assistant_exit_code = _extract_dh_compat_level()
-    dh_issues = []
-
-    static_packaging_files = {
-        kpf.detection_value: kpf
-        for kpf in known_packaging_files.values()
-        if kpf.detection_method == "path"
-    }
-    dh_pkgfile_docs = {
-        kpf.detection_value: kpf
-        for kpf in known_packaging_files.values()
-        if kpf.detection_method == "dh.pkgfile"
-    }
-
-    if is_debputy_package:
-        all_debputy_ppfs = list(
-            flatten_ppfs(
-                detect_all_packager_provided_files(
-                    feature_set.packager_provided_files,
-                    context.debian_dir,
-                    binary_packages,
-                    allow_fuzzy_matches=True,
-                )
-            )
-        )
-    else:
-        all_debputy_ppfs = []
-
-    if dh_compat_level is not None:
-        (
-            all_dh_ppfs,
-            dh_issues,
-            dh_assistant_exit_code,
-        ) = _resolve_debhelper_config_files(
-            context.debian_dir,
-            binary_packages,
-            debputy_plugin_metadata,
-            dh_pkgfile_docs,
-            drules_sequences,
-            dh_compat_level,
-        )
-
-    else:
-        all_dh_ppfs = []
-
-    for ppf in all_debputy_ppfs:
-        key = ppf.path.path
-        ref_doc = ppf.definition.reference_documentation
-        documentation_uris = (
-            ref_doc.format_documentation_uris if ref_doc is not None else None
-        )
-        details: PackagingFileInfo = {
-            "path": key,
-            "debputy-cmd-templates": [
-                ["debputy", "plugin", "show", "p-p-f", ppf.definition.stem]
-            ],
-        }
-        if ppf.fuzzy_match and key.endswith(".in"):
-            _merge_list(details, "file-categories", ["generic-template"])
-            details["generates"] = key[:-3]
-        elif assume_not_none(ppf.path.parent_dir).get(ppf.path.name + ".in"):
-            _merge_list(details, "file-categories", ["generated"])
-            details["generated-from"] = key + ".in"
-        seen_paths.add(key)
-        annotated.append(details)
-        static_details = static_packaging_files.get(key)
-        if static_details is not None:
-            # debhelper compat rules does not apply to debputy files
-            _add_known_packaging_data(details, static_details, None)
-        if documentation_uris:
-            details["documentation-uris"] = list(documentation_uris)
-
-    _merge_ppfs(annotated, seen_paths, all_dh_ppfs, dh_pkgfile_docs, dh_compat_level)
-
-    for virtual_path in _scan_debian_dir(context.debian_dir):
-        key = virtual_path.path
-        if key in seen_paths:
-            continue
-        if virtual_path.is_symlink:
-            try:
-                st = os.stat(virtual_path.fs_path)
-            except FileNotFoundError:
-                continue
-            else:
-                if not stat.S_ISREG(st.st_mode):
-                    continue
-        elif not virtual_path.is_file:
-            continue
-
-        static_match = static_packaging_files.get(virtual_path.path)
-        if static_match is not None:
-            details: PackagingFileInfo = {
-                "path": key,
-            }
-            annotated.append(details)
-            if assume_not_none(virtual_path.parent_dir).get(virtual_path.name + ".in"):
-                details["generated-from"] = key + ".in"
-                _merge_list(details, "file-categories", ["generated"])
-            _add_known_packaging_data(details, static_match, dh_compat_level)
+    annotated, reference_data_set_names, dh_assistant_exit_code, dh_issues = result
 
     data = {
         "result": annotated,
@@ -1368,13 +937,11 @@ def _annotate_debian_directory(context: CommandContext) -> None:
 
 
 def _json_output(data: Any) -> None:
-    format_options = {}
     if sys.stdout.isatty():
-        format_options = {
-            "indent": 4,
-            # sort_keys might be tempting but generally insert order makes more sense in practice.
-        }
-    json.dump(data, sys.stdout, **format_options)
+        # sort_keys might be tempting but generally insert order makes more sense in practice.
+        json.dump(data, sys.stdout, indent=4)
+    else:
+        json.dump(data, sys.stdout)
     if sys.stdout.isatty():
         # Looks better with a final newline.
         print()
@@ -1421,7 +988,13 @@ def _json_output(data: Any) -> None:
     ],
 )
 def _migrate_from_dh(context: CommandContext) -> None:
+    context.must_be_called_in_source_root()
     parsed_args = context.parsed_args
+    resolved_migration_target = _check_migration_target(
+        context,
+        parsed_args.migration_target,
+    )
+    context.debputy_integration_mode = resolved_migration_target
     manifest = context.parse_manifest()
     acceptable_migration_issues = AcceptableMigrationIssues(
         frozenset(
@@ -1429,10 +1002,11 @@ def _migrate_from_dh(context: CommandContext) -> None:
         )
     )
     migrate_from_dh(
+        _output_styling(context.parsed_args, sys.stdout),
         manifest,
         acceptable_migration_issues,
         parsed_args.destructive,
-        parsed_args.migration_target,
+        resolved_migration_target,
         lambda p: context.parse_manifest(manifest_path=p),
     )
 

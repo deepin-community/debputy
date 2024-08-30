@@ -3,17 +3,19 @@ import os
 import re
 import subprocess
 from itertools import chain
-from typing import Optional, List, Callable, Set
+from typing import Optional, List, Callable, Set, Container, Mapping, FrozenSet
 
 from debian.deb822 import Deb822
 
-from debputy.debhelper_emulation import CannotEmulateExecutableDHConfigFile
+from debputy.commands.debputy_cmd.context import CommandContext
+from debputy.commands.debputy_cmd.output import OutputStylingBase
+from debputy.dh.debhelper_emulation import CannotEmulateExecutableDHConfigFile
 from debputy.dh_migration.migrators import MIGRATORS
 from debputy.dh_migration.migrators_impl import (
-    read_dh_addon_sequences,
-    MIGRATION_TARGET_DH_DEBPUTY,
-    MIGRATION_TARGET_DH_DEBPUTY_RRR,
+    INTEGRATION_MODE_DH_DEBPUTY,
+    INTEGRATION_MODE_DH_DEBPUTY_RRR,
 )
+from debputy.dh.dh_assistant import read_dh_addon_sequences
 from debputy.dh_migration.models import (
     FeatureMigration,
     AcceptableMigrationIssues,
@@ -21,12 +23,31 @@ from debputy.dh_migration.models import (
     ConflictingChange,
 )
 from debputy.highlevel_manifest import HighLevelManifest
+from debputy.integration_detection import determine_debputy_integration_mode
 from debputy.manifest_parser.exceptions import ManifestParseException
 from debputy.plugin.api import VirtualPath
+from debputy.plugin.api.spec import DebputyIntegrationMode, INTEGRATION_MODE_FULL
 from debputy.util import _error, _warn, _info, escape_shell, assume_not_none
+
+SUPPORTED_MIGRATIONS: Mapping[
+    DebputyIntegrationMode, FrozenSet[DebputyIntegrationMode]
+] = {
+    INTEGRATION_MODE_FULL: frozenset([INTEGRATION_MODE_FULL]),
+    INTEGRATION_MODE_DH_DEBPUTY: frozenset(
+        [INTEGRATION_MODE_DH_DEBPUTY, INTEGRATION_MODE_FULL]
+    ),
+    INTEGRATION_MODE_DH_DEBPUTY_RRR: frozenset(
+        [
+            INTEGRATION_MODE_DH_DEBPUTY_RRR,
+            INTEGRATION_MODE_DH_DEBPUTY,
+            INTEGRATION_MODE_FULL,
+        ]
+    ),
+}
 
 
 def _print_migration_summary(
+    fo: OutputStylingBase,
     migrations: List[FeatureMigration],
     compat: int,
     min_compat_level: int,
@@ -40,9 +61,11 @@ def _print_migration_summary(
             continue
         underline = "-" * len(migration.tagline)
         if migration.warnings:
+            if warning_count:
+                _warn("")
             _warn(f"Summary for migration: {migration.tagline}")
-            _warn(f"-----------------------{underline}")
-            _warn(" /!\\ ATTENTION /!\\")
+            if not fo.optimize_for_screen_reader:
+                _warn(f"-----------------------{underline}")
             warning_count += len(migration.warnings)
             for warning in migration.warnings:
                 _warn(f"    * {warning}")
@@ -51,7 +74,8 @@ def _print_migration_summary(
         if warning_count:
             _warn("")
         _warn("Supported debhelper compat check")
-        _warn("--------------------------------")
+        if not fo.optimize_for_screen_reader:
+            _warn("--------------------------------")
         warning_count += 1
         _warn(
             f"The migration tool assumes debhelper compat {min_compat_level}+ semantics, but this package"
@@ -66,7 +90,8 @@ def _print_migration_summary(
             if warning_count:
                 _warn("")
             _warn("Missing debputy plugin check")
-            _warn("----------------------------")
+            if not fo.optimize_for_screen_reader:
+                _warn("----------------------------")
             _warn(
                 f"The migration tool could not read d/control and therefore cannot tell if all the required"
                 f" plugins have been requested.  Please ensure that the package Build-Depends on: {needed_plugins}"
@@ -81,7 +106,8 @@ def _print_migration_summary(
                 if warning_count:
                     _warn("")
                 _warn("Missing debputy plugin check")
-                _warn("----------------------------")
+                if not fo.optimize_for_screen_reader:
+                    _warn("----------------------------")
                 _warn(
                     f"The migration tool asserted that the following `debputy` plugins would be required, which"
                     f" are not explicitly requested.  Please add the following to Build-Depends: {needed_plugins}"
@@ -141,47 +167,58 @@ def _requested_debputy_plugins(debian_dir: VirtualPath) -> Optional[Set[str]]:
 
 
 def _check_migration_target(
-    debian_dir: VirtualPath,
-    migration_target: Optional[str],
-) -> str:
-    r = read_dh_addon_sequences(debian_dir)
-    if r is None and migration_target is None:
-        _error("debian/control is missing and no migration target was provided")
-    bd_sequences, dr_sequences = r
-    all_sequences = bd_sequences | dr_sequences
-
-    has_zz_debputy = "zz-debputy" in all_sequences or "debputy" in all_sequences
-    has_zz_debputy_rrr = "zz-debputy-rrr" in all_sequences
-    has_any_existing = has_zz_debputy or has_zz_debputy_rrr
-
-    if migration_target == "dh-sequence-zz-debputy-rrr" and has_zz_debputy:
-        _error("Cannot migrate from (zz-)debputy to zz-debputy-rrr")
-
-    if has_zz_debputy_rrr and not has_zz_debputy:
-        resolved_migration_target = MIGRATION_TARGET_DH_DEBPUTY_RRR
+    context: CommandContext,
+    migration_target: Optional[DebputyIntegrationMode],
+) -> DebputyIntegrationMode:
+    r = read_dh_addon_sequences(context.debian_dir)
+    if r is not None:
+        bd_sequences, dr_sequences, _ = r
+        all_sequences = bd_sequences | dr_sequences
+        detected_migration_target = determine_debputy_integration_mode(
+            context.source_package().fields,
+            all_sequences,
+        )
     else:
-        resolved_migration_target = MIGRATION_TARGET_DH_DEBPUTY
+        detected_migration_target = None
+
+    if migration_target is not None and detected_migration_target is not None:
+        supported_migrations = SUPPORTED_MIGRATIONS.get(
+            detected_migration_target,
+            frozenset([detected_migration_target]),
+        )
+
+        if (
+            migration_target != detected_migration_target
+            and migration_target not in supported_migrations
+        ):
+            _error(
+                f"Cannot migrate from {detected_migration_target} to {migration_target}"
+            )
 
     if migration_target is not None:
         resolved_migration_target = migration_target
-
-    if has_any_existing:
-        _info(
-            f'Using "{resolved_migration_target}" as migration target based on the packaging'
-        )
+        _info(f'Using "{resolved_migration_target}" as migration target as requested')
     else:
-        _info(
-            f'Using "{resolved_migration_target}" as default migration target. Use --migration-target to choose!'
-        )
+        if detected_migration_target is not None:
+            _info(
+                f'Using "{detected_migration_target}" as migration target based on the packaging'
+            )
+        else:
+            detected_migration_target = INTEGRATION_MODE_DH_DEBPUTY
+            _info(
+                f'Using "{detected_migration_target}" as default migration target. Use --migration-target to choose!'
+            )
+        resolved_migration_target = detected_migration_target
 
     return resolved_migration_target
 
 
 def migrate_from_dh(
+    fo: OutputStylingBase,
     manifest: HighLevelManifest,
     acceptable_migration_issues: AcceptableMigrationIssues,
     permit_destructive_changes: Optional[bool],
-    migration_target: Optional[str],
+    migration_target: DebputyIntegrationMode,
     manifest_parser_factory: Callable[[str], HighLevelManifest],
 ) -> None:
     migrations = []
@@ -194,17 +231,15 @@ def migrate_from_dh(
     debian_dir = manifest.debian_dir
     mutable_manifest = assume_not_none(manifest.mutable_manifest)
 
-    resolved_migration_target = _check_migration_target(debian_dir, migration_target)
-
     try:
-        for migrator in MIGRATORS[resolved_migration_target]:
-            feature_migration = FeatureMigration(migrator.__name__)
+        for migrator in MIGRATORS[migration_target]:
+            feature_migration = FeatureMigration(migrator.__name__, fo)
             migrator(
                 debian_dir,
                 manifest,
                 acceptable_migration_issues,
                 feature_migration,
-                resolved_migration_target,
+                migration_target,
             )
             migrations.append(feature_migration)
     except CannotEmulateExecutableDHConfigFile as e:
@@ -264,7 +299,12 @@ def migrate_from_dh(
     )
 
     _print_migration_summary(
-        migrations, compat, min_compat, required_plugins, requested_plugins
+        fo,
+        migrations,
+        compat,
+        min_compat,
+        required_plugins,
+        requested_plugins,
     )
     migration_count = sum((m.performed_changes for m in migrations), 0)
 

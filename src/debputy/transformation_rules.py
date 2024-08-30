@@ -11,6 +11,7 @@ from typing import (
     Dict,
     TypeVar,
     cast,
+    final,
 )
 
 from debputy.exceptions import (
@@ -27,12 +28,15 @@ from debputy.manifest_parser.base_types import (
     FileSystemMode,
     StaticFileSystemOwner,
     StaticFileSystemGroup,
-    DebputyDispatchableType,
 )
+from debputy.manifest_parser.tagging_types import DebputyDispatchableType
 from debputy.manifest_parser.util import AttributePath
 from debputy.path_matcher import MatchRule
 from debputy.plugin.api import VirtualPath
 from debputy.plugin.debputy.types import DebputyCapability
+from debputy.plugin.plugin_state import (
+    run_in_context_of_plugin_wrap_errors,
+)
 from debputy.util import _warn
 
 
@@ -59,10 +63,26 @@ class PreProvidedExclusion:
 
 
 class TransformationRule(DebputyDispatchableType):
+
     __slots__ = ()
 
+    @final
+    def run_transform_file_system(
+        self,
+        fs_root: FSPath,
+        condition_context: ConditionContext,
+    ) -> None:
+        run_in_context_of_plugin_wrap_errors(
+            self._debputy_plugin,
+            self.transform_file_system,
+            fs_root,
+            condition_context,
+        )
+
     def transform_file_system(
-        self, fs_root: FSPath, condition_context: ConditionContext
+        self,
+        fs_root: FSPath,
+        condition_context: ConditionContext,
     ) -> None:
         raise NotImplementedError
 
@@ -134,6 +154,7 @@ class RemoveTransformationRule(TransformationRule):
         keep_empty_parent_dirs: bool,
         definition_source: AttributePath,
     ) -> None:
+        super().__init__()
         self._match_rules = match_rules
         self._keep_empty_parent_dirs = keep_empty_parent_dirs
         self._definition_source = definition_source.path
@@ -180,6 +201,7 @@ class MoveTransformationRule(TransformationRule):
         definition_source: AttributePath,
         condition: Optional[ManifestCondition],
     ) -> None:
+        super().__init__()
         self._match_rule = match_rule
         self._dest_path = dest_path
         self._dest_is_dir = dest_is_dir
@@ -283,6 +305,7 @@ class CreateSymlinkPathTransformationRule(TransformationRule):
         definition_source: AttributePath,
         condition: Optional[ManifestCondition],
     ) -> None:
+        super().__init__()
         self._link_target = link_target
         self._link_dest = link_dest
         self._replacement_rule = replacement_rule
@@ -482,9 +505,9 @@ class PathMetadataTransformationRule(TransformationRule):
         capability_mode = self._capability_mode
         definition_source = self._definition_source
         d: Optional[List[FSPath]] = [] if self._recursive else None
-        needs_file_match = False
+        needs_file_match = True
         if self._owner is not None or self._group is not None or self._mode is not None:
-            needs_file_match = True
+            needs_file_match = False
 
         for match_rule in self._match_rules:
             match_ok = False
@@ -550,6 +573,9 @@ class ModeNormalizationTransformationRule(TransformationRule):
         self,
         normalizations: Sequence[Tuple[MatchRule, FileSystemMode]],
     ) -> None:
+        # A bit of a hack since it is initialized outside `debputy`. It probably should not
+        # be a "TransformationRule" (hindsight and all)
+        run_in_context_of_plugin_wrap_errors("debputy", super().__init__)
         self._normalizations = normalizations
 
     def transform_file_system(
@@ -575,6 +601,12 @@ class ModeNormalizationTransformationRule(TransformationRule):
 
 
 class NormalizeShebangLineTransformation(TransformationRule):
+
+    def __init__(self) -> None:
+        # A bit of a hack since it is initialized outside `debputy`. It probably should not
+        # be a "TransformationRule" (hindsight and all)
+        run_in_context_of_plugin_wrap_errors("debputy", super().__init__)
+
     def transform_file_system(
         self,
         fs_root: VirtualPath,

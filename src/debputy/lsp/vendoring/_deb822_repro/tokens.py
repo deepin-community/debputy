@@ -161,6 +161,10 @@ class Deb822Token(Locatable):
         return False
 
     @property
+    def is_separator(self) -> bool:
+        return False
+
+    @property
     def text(self):
         # type: () -> str
         return self._text
@@ -170,7 +174,7 @@ class Deb822Token(Locatable):
         # type: () -> str
         return self._text
 
-    def size(self, *, skip_leading_comments: bool = False) -> Range:
+    def size(self) -> Range:
         # As tokens are an atomic unit
         token_size = self._token_size
         if token_size is not None:
@@ -253,6 +257,10 @@ class Deb822SpaceSeparatorToken(Deb822SemanticallySignificantWhiteSpace):
 
     __slots__ = ()
 
+    @property
+    def is_separator(self) -> bool:
+        return True
+
 
 class Deb822ErrorToken(Deb822Token):
     """Token that represents a syntactical error"""
@@ -296,8 +304,12 @@ class Deb822SeparatorToken(Deb822Token):
 
     __slots__ = ()
 
+    @property
+    def is_separator(self) -> bool:
+        return True
 
-class Deb822FieldSeparatorToken(Deb822Token):
+
+class Deb822FieldSeparatorToken(Deb822SeparatorToken):
 
     __slots__ = ()
 
@@ -487,6 +499,11 @@ def _value_line_tokenizer(func):
 def whitespace_split_tokenizer(v):
     # type: (str) -> Iterable[Deb822Token]
     assert "\n" not in v
+    if not v or v.isspace():
+        # Special-case: Empty field/whitespace only field
+        if v:
+            yield Deb822SpaceSeparatorToken(sys.intern(v))
+        return
     for match in _RE_WHITESPACE_SEPARATED_WORD_LIST.finditer(v):
         space_before, word, space_after = match.groups()
         if space_before:

@@ -26,7 +26,7 @@ from ._deb_options_profiles import DebBuildOptionsAndProfiles
 from ._manifest_constants import *
 from .architecture_support import DpkgArchitectureBuildProcessValuesTable
 from .builtin_manifest_rules import builtin_mode_normalization_rules
-from .debhelper_emulation import (
+from debputy.dh.debhelper_emulation import (
     dhe_dbgsym_root_dir,
     assert_no_dbgsym_migration,
     read_dbgsym_file,
@@ -49,7 +49,11 @@ from .maintscript_snippet import (
     MaintscriptSnippetContainer,
 )
 from .manifest_conditions import ConditionContext
-from .manifest_parser.base_types import FileSystemMatchRule, FileSystemExactMatchRule
+from .manifest_parser.base_types import (
+    FileSystemMatchRule,
+    FileSystemExactMatchRule,
+    BuildEnvironments,
+)
 from .manifest_parser.util import AttributePath
 from .packager_provided_files import PackagerProvidedFile
 from .packages import BinaryPackage, SourcePackage
@@ -59,8 +63,15 @@ from .plugin.api.impl_types import (
     PackageProcessingContextProvider,
     PackageDataTable,
 )
-from .plugin.api.spec import FlushableSubstvars, VirtualPath
+from .plugin.api.spec import (
+    FlushableSubstvars,
+    VirtualPath,
+    DebputyIntegrationMode,
+    INTEGRATION_MODE_DH_DEBPUTY_RRR,
+)
 from .plugin.debputy.binary_package_rules import ServiceRule
+from .plugin.debputy.to_be_api_types import BuildRule
+from .plugin.plugin_state import run_in_context_of_plugin
 from .substitution import Substitution
 from .transformation_rules import (
     TransformationRule,
@@ -1036,7 +1047,9 @@ def _install_everything_from_source_dir_if_present(
 ) -> None:
     attribute_path = AttributePath.builtin_path()[f"installing {source_dir.fs_path}"]
     pkg_set = frozenset([dctrl_bin])
-    install_rule = InstallRule.install_dest(
+    install_rule = run_in_context_of_plugin(
+        "debputy",
+        InstallRule.install_dest,
         [FileSystemMatchRule.from_path_match("*", attribute_path, substitution)],
         None,
         pkg_set,
@@ -1086,6 +1099,8 @@ class HighLevelManifest:
         dpkg_architecture_variables: DpkgArchitectureBuildProcessValuesTable,
         dpkg_arch_query_table: DpkgArchTable,
         build_env: DebBuildOptionsAndProfiles,
+        build_environments: BuildEnvironments,
+        build_rules: Optional[List[BuildRule]],
         plugin_provided_feature_set: PluginProvidedFeatureSet,
         debian_dir: VirtualPath,
     ) -> None:
@@ -1100,8 +1115,17 @@ class HighLevelManifest:
         self._dpkg_arch_query_table = dpkg_arch_query_table
         self._build_env = build_env
         self._used_for: Set[str] = set()
+        self.build_environments = build_environments
+        self.build_rules = build_rules
         self._plugin_provided_feature_set = plugin_provided_feature_set
         self._debian_dir = debian_dir
+        self._source_condition_context = ConditionContext(
+            binary_package=None,
+            substitution=self.substitution,
+            deb_options_and_profiles=self._build_env,
+            dpkg_architecture_variables=self._dpkg_architecture_variables,
+            dpkg_arch_query_table=self._dpkg_arch_query_table,
+        )
 
     def source_version(self, include_binnmu_version: bool = True) -> str:
         # TODO: There should an easier way to determine the source version; really.
@@ -1116,6 +1140,10 @@ class HighLevelManifest:
             raise AssertionError(f"Could not resolve {version_var}") from e
 
     @property
+    def source_condition_context(self) -> ConditionContext:
+        return self._source_condition_context
+
+    @property
     def debian_dir(self) -> VirtualPath:
         return self._debian_dir
 
@@ -1124,7 +1152,7 @@ class HighLevelManifest:
         return self._dpkg_architecture_variables
 
     @property
-    def build_env(self) -> DebBuildOptionsAndProfiles:
+    def deb_options_and_profiles(self) -> DebBuildOptionsAndProfiles:
         return self._build_env
 
     @property
@@ -1162,12 +1190,15 @@ class HighLevelManifest:
 
     def perform_installations(
         self,
+        integration_mode: DebputyIntegrationMode,
         *,
         install_request_context: Optional[InstallSearchDirContext] = None,
-        enable_manifest_installation_feature: bool = True,
     ) -> PackageDataTable:
         package_data_dict = {}
         package_data_table = PackageDataTable(package_data_dict)
+        enable_manifest_installation_feature = (
+            integration_mode != INTEGRATION_MODE_DH_DEBPUTY_RRR
+        )
         if install_request_context is None:
 
             @functools.lru_cache(None)
@@ -1178,6 +1209,7 @@ class HighLevelManifest:
             source_root_dir = _as_path(".")
             into = frozenset(self._binary_packages.values())
             default_search_dirs = [dtmp_dir]
+            # TODO: In integration-mode full use build systems to define the per_package_search_dirs
             per_package_search_dirs = {
                 t.binary_package: [_as_path(f.match_rule.path) for f in t.search_dirs]
                 for t in self.package_transformations.values()
@@ -1194,12 +1226,15 @@ class HighLevelManifest:
                 for s in search_dirs
                 if s.search_dir.fs_path != source_root_dir.fs_path
             )
-            _present_installation_dirs(search_dirs, check_for_uninstalled_dirs, into)
+            if enable_manifest_installation_feature:
+                _present_installation_dirs(
+                    search_dirs, check_for_uninstalled_dirs, into
+                )
         else:
             dtmp_dir = None
             search_dirs = install_request_context.search_dirs
             into = frozenset(self._binary_packages.values())
-            seen = set()
+            seen: Set[BinaryPackage] = set()
             for search_dir in search_dirs:
                 seen.update(search_dir.applies_to)
 
@@ -1267,13 +1302,7 @@ class HighLevelManifest:
             ]
         path_matcher = SourcePathMatcher(discard_rules)
 
-        source_condition_context = ConditionContext(
-            binary_package=None,
-            substitution=self.substitution,
-            build_env=self._build_env,
-            dpkg_architecture_variables=self._dpkg_architecture_variables,
-            dpkg_arch_query_table=self._dpkg_arch_query_table,
-        )
+        source_condition_context = self._source_condition_context
 
         for dctrl_bin in self.active_packages:
             package = dctrl_bin.name
@@ -1404,7 +1433,8 @@ class HighLevelManifest:
                 dbgsym_info,
             )
 
-        _list_automatic_discard_rules(path_matcher)
+        if enable_manifest_installation_feature:
+            _list_automatic_discard_rules(path_matcher)
 
         return package_data_table
 
@@ -1412,23 +1442,14 @@ class HighLevelManifest:
         self, binary_package: Optional[Union[BinaryPackage, str]]
     ) -> ConditionContext:
         if binary_package is None:
-            return ConditionContext(
-                binary_package=None,
-                substitution=self.substitution,
-                build_env=self._build_env,
-                dpkg_architecture_variables=self._dpkg_architecture_variables,
-                dpkg_arch_query_table=self._dpkg_arch_query_table,
-            )
+            return self._source_condition_context
         if not isinstance(binary_package, str):
             binary_package = binary_package.name
 
         package_transformation = self.package_transformations[binary_package]
-        return ConditionContext(
+        return self._source_condition_context.replace(
             binary_package=package_transformation.binary_package,
             substitution=package_transformation.substitution,
-            build_env=self._build_env,
-            dpkg_architecture_variables=self._dpkg_architecture_variables,
-            dpkg_arch_query_table=self._dpkg_arch_query_table,
         )
 
     def apply_fs_transformations(
@@ -1448,7 +1469,7 @@ class HighLevelManifest:
         condition_context = ConditionContext(
             binary_package=package_transformation.binary_package,
             substitution=package_transformation.substitution,
-            build_env=self._build_env,
+            deb_options_and_profiles=self._build_env,
             dpkg_architecture_variables=self._dpkg_architecture_variables,
             dpkg_arch_query_table=self._dpkg_arch_query_table,
         )
@@ -1462,7 +1483,7 @@ class HighLevelManifest:
         norm_mode_transformation_rule = ModeNormalizationTransformationRule(norm_rules)
         norm_mode_transformation_rule.transform_file_system(fs_root, condition_context)
         for transformation in package_transformation.transformations:
-            transformation.transform_file_system(fs_root, condition_context)
+            transformation.run_transform_file_system(fs_root, condition_context)
         interpreter_normalization = NormalizeShebangLineTransformation()
         interpreter_normalization.transform_file_system(fs_root, condition_context)
 

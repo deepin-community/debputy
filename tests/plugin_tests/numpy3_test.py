@@ -1,4 +1,5 @@
 import os
+from typing import Iterator
 
 import pytest
 
@@ -12,7 +13,7 @@ DATA_FILE = os.path.join(os.path.dirname(__file__), "numpy3_test.data")
 
 
 @pytest.fixture(scope="session")
-def numpy3_stub_data_file() -> None:
+def numpy3_stub_data_file() -> Iterator[None]:
     os.environ["_NUMPY_TEST_PATH"] = DATA_FILE
     yield
     try:

@@ -1,5 +1,6 @@
 import collections
 import dataclasses
+import typing
 from typing import (
     Any,
     Callable,
@@ -16,7 +17,6 @@ from typing import (
     Mapping,
     Optional,
     cast,
-    is_typeddict,
     Type,
     Union,
     List,
@@ -28,13 +28,7 @@ from typing import (
     Container,
 )
 
-from debputy.manifest_parser.base_types import (
-    DebputyParsedContent,
-    FileSystemMatchRule,
-    FileSystemExactMatchRule,
-    DebputyDispatchableType,
-    TypeMapping,
-)
+from debputy.manifest_parser.base_types import FileSystemMatchRule
 from debputy.manifest_parser.exceptions import (
     ManifestParseException,
 )
@@ -43,13 +37,29 @@ from debputy.manifest_parser.mapper_code import (
     wrap_into_list,
     map_each_element,
 )
+from debputy.manifest_parser.parse_hints import (
+    ConditionalRequired,
+    DebputyParseHint,
+    TargetAttribute,
+    ManifestAttribute,
+    ConflictWithSourceAttribute,
+    NotPathHint,
+)
 from debputy.manifest_parser.parser_data import ParserContextData
-from debputy.manifest_parser.util import AttributePath, unpack_type, find_annotation
+from debputy.manifest_parser.tagging_types import (
+    DebputyParsedContent,
+    DebputyDispatchableType,
+    TypeMapping,
+)
+from debputy.manifest_parser.util import (
+    AttributePath,
+    unpack_type,
+    find_annotation,
+    check_integration_mode,
+)
 from debputy.plugin.api.impl_types import (
     DeclarativeInputParser,
     TD,
-    _ALL_PACKAGE_TYPES,
-    resolve_package_type_selectors,
     ListWrappedDeclarativeInputParser,
     DispatchingObjectParser,
     DispatchingTableParser,
@@ -57,7 +67,14 @@ from debputy.plugin.api.impl_types import (
     TP,
     InPackageContextParser,
 )
-from debputy.plugin.api.spec import ParserDocumentation, PackageTypeSelector
+from debputy.plugin.api.spec import (
+    ParserDocumentation,
+    DebputyIntegrationMode,
+    StandardParserAttributeDocumentation,
+    undocumented_attr,
+    ParserAttributeDocumentation,
+    reference_documentation,
+)
 from debputy.util import _info, _warn, assume_not_none
 
 try:
@@ -242,6 +259,9 @@ def _extract_path_hint(v: Any, attribute_path: AttributePath) -> bool:
 class DeclarativeNonMappingInputParser(DeclarativeInputParser[TD], Generic[TD, SF]):
     alt_form_parser: AttributeDescription
     inline_reference_documentation: Optional[ParserDocumentation] = None
+    expected_debputy_integration_mode: Optional[Container[DebputyIntegrationMode]] = (
+        None
+    )
 
     def parse_input(
         self,
@@ -250,6 +270,11 @@ class DeclarativeNonMappingInputParser(DeclarativeInputParser[TD], Generic[TD, S
         *,
         parser_context: Optional["ParserContextData"] = None,
     ) -> TD:
+        check_integration_mode(
+            path,
+            parser_context,
+            self.expected_debputy_integration_mode,
+        )
         if self.reference_documentation_url is not None:
             doc_ref = f" (Documentation: {self.reference_documentation_url})"
         else:
@@ -286,6 +311,9 @@ class DeclarativeMappingInputParser(DeclarativeInputParser[TD], Generic[TD, SF])
     _per_attribute_conflicts_cache: Optional[Mapping[str, FrozenSet[str]]] = None
     inline_reference_documentation: Optional[ParserDocumentation] = None
     path_hint_source_attributes: Sequence[str] = tuple()
+    expected_debputy_integration_mode: Optional[Container[DebputyIntegrationMode]] = (
+        None
+    )
 
     def _parse_alt_form(
         self,
@@ -329,16 +357,16 @@ class DeclarativeMappingInputParser(DeclarativeInputParser[TD], Generic[TD, SF])
             if unused_keys:
                 k = ", ".join(unused_keys)
                 raise ManifestParseException(
-                    f'Unknown keys "{unknown_keys}" at {path.path}".  Keys that could be used here are: {k}.{doc_ref}'
+                    f'Unknown keys "{unknown_keys}" at {path.path_container_lc}".  Keys that could be used here are: {k}.{doc_ref}'
                 )
             raise ManifestParseException(
-                f'Unknown keys "{unknown_keys}" at {path.path}".  Please remove them.{doc_ref}'
+                f'Unknown keys "{unknown_keys}" at {path.path_container_lc}".  Please remove them.{doc_ref}'
             )
         missing_keys = self.input_time_required_parameters - value.keys()
         if missing_keys:
             required = ", ".join(repr(k) for k in sorted(missing_keys))
             raise ManifestParseException(
-                f"The following keys were required but not present at {path.path}: {required}{doc_ref}"
+                f"The following keys were required but not present at {path.path_container_lc}: {required}{doc_ref}"
             )
         for maybe_required in self.all_parameters - value.keys():
             attr = self.manifest_attributes[maybe_required]
@@ -351,14 +379,14 @@ class DeclarativeMappingInputParser(DeclarativeInputParser[TD], Generic[TD, SF])
             ):
                 reason = attr.conditional_required.reason
                 raise ManifestParseException(
-                    f'Missing the *conditionally* required attribute "{maybe_required}" at {path.path}. {reason}{doc_ref}'
+                    f'Missing the *conditionally* required attribute "{maybe_required}" at {path.path_container_lc}. {reason}{doc_ref}'
                 )
         for keyset in self.at_least_one_of:
             matched_keys = value.keys() & keyset
             if not matched_keys:
                 conditionally_required = ", ".join(repr(k) for k in sorted(keyset))
                 raise ManifestParseException(
-                    f"At least one of the following keys must be present at {path.path}:"
+                    f"At least one of the following keys must be present at {path.path_container_lc}:"
                     f" {conditionally_required}{doc_ref}"
                 )
         for group in self.mutually_exclusive_attributes:
@@ -366,7 +394,7 @@ class DeclarativeMappingInputParser(DeclarativeInputParser[TD], Generic[TD, SF])
             if len(matched) > 1:
                 ck = ", ".join(repr(k) for k in sorted(matched))
                 raise ManifestParseException(
-                    f"Could not parse {path.path}: The following attributes are"
+                    f"Could not parse {path.path_container_lc}: The following attributes are"
                     f" mutually exclusive: {ck}{doc_ref}"
                 )
 
@@ -422,6 +450,11 @@ class DeclarativeMappingInputParser(DeclarativeInputParser[TD], Generic[TD, SF])
         *,
         parser_context: Optional["ParserContextData"] = None,
     ) -> TD:
+        check_integration_mode(
+            path,
+            parser_context,
+            self.expected_debputy_integration_mode,
+        )
         if value is None:
             form_note = " The attribute must be a mapping."
             if self.alt_form_parser is not None:
@@ -453,242 +486,6 @@ class DeclarativeMappingInputParser(DeclarativeInputParser[TD], Generic[TD, SF])
         return self._per_attribute_conflicts_cache
 
 
-class DebputyParseHint:
-    @classmethod
-    def target_attribute(cls, target_attribute: str) -> "DebputyParseHint":
-        """Define this source attribute to have a different target attribute name
-
-        As an example:
-
-            >>> class SourceType(TypedDict):
-            ...     source: Annotated[NotRequired[str], DebputyParseHint.target_attribute("sources")]
-            ...     sources: NotRequired[List[str]]
-            >>> class TargetType(TypedDict):
-            ...     sources: List[str]
-            >>> pg = ParserGenerator()
-            >>> parser = pg.generate_parser(TargetType, source_content=SourceType)
-
-        In this example, the user can provide either `source` or `sources` and the parser will
-        map them to the `sources` attribute in the `TargetType`.  Note this example relies on
-        the builtin mapping of `str` to `List[str]` to align the types between `source` (from
-        SourceType) and `sources` (from TargetType).
-
-        The following rules apply:
-
-         * All source attributes that map to the same target attribute will be mutually exclusive
-           (that is, the user cannot give `source` *and* `sources` as input).
-         * When the target attribute is required, the source attributes are conditionally
-           mandatory requiring the user to provide exactly one of them.
-         * When multiple source attributes point to a single target attribute, none of the source
-           attributes can be Required.
-         * The annotation can only be used for the source type specification and the source type
-           specification must be different from the target type specification.
-
-        The `target_attribute` annotation can be used without having multiple source attributes. This
-        can be useful if the source attribute name is not valid as a python variable identifier to
-        rename it to a valid python identifier.
-
-        :param target_attribute: The attribute name in the target content
-        :return: The annotation.
-        """
-        return TargetAttribute(target_attribute)
-
-    @classmethod
-    def conflicts_with_source_attributes(
-        cls,
-        *conflicting_source_attributes: str,
-    ) -> "DebputyParseHint":
-        """Declare a conflict with one or more source attributes
-
-        Example:
-
-            >>> class SourceType(TypedDict):
-            ...     source: Annotated[NotRequired[str], DebputyParseHint.target_attribute("sources")]
-            ...     sources: NotRequired[List[str]]
-            ...     into_dir: NotRequired[str]
-            ...     renamed_to: Annotated[
-            ...         NotRequired[str],
-            ...         DebputyParseHint.conflicts_with_source_attributes("sources", "into_dir")
-            ... ]
-            >>> class TargetType(TypedDict):
-            ...     sources: List[str]
-            ...     into_dir: NotRequired[str]
-            ...     renamed_to: NotRequired[str]
-            >>> pg = ParserGenerator()
-            >>> parser = pg.generate_parser(TargetType, source_content=SourceType)
-
-        In this example, if the user was to provide `renamed_to` with `sources` or `into_dir` the parser would report
-        an error. However, the parser will allow `renamed_to` with `source` as the conflict is considered only for
-        the input source. That is, it is irrelevant that `sources` and `source´ happens to "map" to the same target
-        attribute.
-
-        The following rules apply:
-          * It is not possible for a target attribute to declare conflicts unless the target type spec is reused as
-            source type spec.
-          * All attributes involved in a conflict must be NotRequired.  If any of the attributes are Required, then
-            the parser generator will reject the input.
-          * All attributes listed in the conflict must be valid attributes in the source type spec.
-
-        Note you do not have to specify conflicts between two attributes with the same target attribute name.  The
-         `target_attribute` annotation will handle that for you.
-
-        :param conflicting_source_attributes: All source attributes that cannot be used with this attribute.
-        :return: The annotation.
-        """
-        if len(conflicting_source_attributes) < 1:
-            raise ValueError(
-                "DebputyParseHint.conflicts_with_source_attributes requires at least one attribute as input"
-            )
-        return ConflictWithSourceAttribute(frozenset(conflicting_source_attributes))
-
-    @classmethod
-    def required_when_single_binary(
-        cls,
-        *,
-        package_type: PackageTypeSelector = _ALL_PACKAGE_TYPES,
-    ) -> "DebputyParseHint":
-        """Declare a source attribute as required when the source package produces exactly one binary package
-
-        The attribute in question must always be declared as `NotRequired` in the TypedDict and this condition
-        can only be used for source attributes.
-        """
-        resolved_package_types = resolve_package_type_selectors(package_type)
-        reason = "The field is required for source packages producing exactly one binary package"
-        if resolved_package_types != _ALL_PACKAGE_TYPES:
-            types = ", ".join(sorted(resolved_package_types))
-            reason += f" of type {types}"
-            return ConditionalRequired(
-                reason,
-                lambda c: len(
-                    [
-                        p
-                        for p in c.binary_packages.values()
-                        if p.package_type in package_type
-                    ]
-                )
-                == 1,
-            )
-        return ConditionalRequired(
-            reason,
-            lambda c: c.is_single_binary_package,
-        )
-
-    @classmethod
-    def required_when_multi_binary(
-        cls,
-        *,
-        package_type: PackageTypeSelector = _ALL_PACKAGE_TYPES,
-    ) -> "DebputyParseHint":
-        """Declare a source attribute as required when the source package produces two or more binary package
-
-        The attribute in question must always be declared as `NotRequired` in the TypedDict and this condition
-        can only be used for source attributes.
-        """
-        resolved_package_types = resolve_package_type_selectors(package_type)
-        reason = "The field is required for source packages producing two or more binary packages"
-        if resolved_package_types != _ALL_PACKAGE_TYPES:
-            types = ", ".join(sorted(resolved_package_types))
-            reason = (
-                "The field is required for source packages producing not producing exactly one binary packages"
-                f" of type {types}"
-            )
-            return ConditionalRequired(
-                reason,
-                lambda c: len(
-                    [
-                        p
-                        for p in c.binary_packages.values()
-                        if p.package_type in package_type
-                    ]
-                )
-                != 1,
-            )
-        return ConditionalRequired(
-            reason,
-            lambda c: not c.is_single_binary_package,
-        )
-
-    @classmethod
-    def manifest_attribute(cls, attribute: str) -> "DebputyParseHint":
-        """Declare what the attribute name (as written in the manifest) should be
-
-        By default, debputy will do an attribute normalizing that will take valid python identifiers such
-        as `dest_dir` and remap it to the manifest variant (such as `dest-dir`) automatically.  If you have
-        a special case, where this built-in normalization is insufficient or the python name is considerably
-        different from what the user would write in the manifest, you can use this parse hint to set the
-        name that the user would have to write in the manifest for this attribute.
-
-            >>> class SourceType(TypedDict):
-            ...     source: List[FileSystemMatchRule]
-            ...     # Use "as" in the manifest because "as_" was not pretty enough
-            ...     install_as: Annotated[NotRequired[FileSystemExactMatchRule], DebputyParseHint.manifest_attribute("as")]
-
-        In this example, we use the parse hint to use "as" as the name in the manifest, because we cannot
-        use "as" a valid python identifier (it is a keyword).  While debputy would map `as_` to `as` for us,
-        we have chosen to use `install_as` as a python identifier.
-        """
-        return ManifestAttribute(attribute)
-
-    @classmethod
-    def not_path_error_hint(cls) -> "DebputyParseHint":
-        """Mark this attribute as not a "path hint" when it comes to reporting errors
-
-        By default, `debputy` will pick up attributes that uses path names (FileSystemMatchRule) as
-        candidates for parse error hints (the little "<Search for: VALUE>" in error messages).
-
-        Most rules only have one active path-based attribute and paths tends to be unique enough
-        that it helps people spot the issue faster. However, in rare cases, you can have multiple
-        attributes that fit the bill. In this case, this hint can be used to "hide" the suboptimal
-        choice. As an example:
-
-            >>> class SourceType(TypedDict):
-            ...     source: List[FileSystemMatchRule]
-            ...     install_as: Annotated[NotRequired[FileSystemExactMatchRule], DebputyParseHint.not_path_error_hint()]
-
-        In this case, without the hint, `debputy` might pick up `install_as` as the attribute to
-        use as hint for error reporting. However, here we have decided that we never want `install_as`
-        leaving `source` as the only option.
-
-        Generally, this type hint must be placed on the **source** format. Any source attribute matching
-        the parsed format will be ignored.
-
-        Mind the asymmetry: The annotation is placed in the **source** format while `debputy` looks at
-        the type of the target attribute to determine if it counts as path.
-        """
-        return NOT_PATH_HINT
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class TargetAttribute(DebputyParseHint):
-    attribute: str
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class ConflictWithSourceAttribute(DebputyParseHint):
-    conflicting_attributes: FrozenSet[str]
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class ConditionalRequired(DebputyParseHint):
-    reason: str
-    condition: Callable[["ParserContextData"], bool]
-
-    def condition_applies(self, context: "ParserContextData") -> bool:
-        return self.condition(context)
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class ManifestAttribute(DebputyParseHint):
-    attribute: str
-
-
-class NotPathHint(DebputyParseHint):
-    pass
-
-
-NOT_PATH_HINT = NotPathHint()
-
-
 def _is_path_attribute_candidate(
     source_attribute: AttributeDescription, target_attribute: AttributeDescription
 ) -> bool:
@@ -705,6 +502,16 @@ def _is_path_attribute_candidate(
     return isinstance(match_type, type) and issubclass(match_type, FileSystemMatchRule)
 
 
+if typing.is_typeddict(DebputyParsedContent):
+    is_typeddict = typing.is_typeddict
+else:
+
+    def is_typeddict(t: Any) -> bool:
+        if typing.is_typeddict(t):
+            return True
+        return isinstance(t, type) and issubclass(t, DebputyParsedContent)
+
+
 class ParserGenerator:
     def __init__(self) -> None:
         self._registered_types: Dict[Any, TypeMapping[Any, Any]] = {}
@@ -714,11 +521,17 @@ class ParserGenerator:
         ] = {}
         self._in_package_context_parser: Dict[str, Any] = {}
 
-    def register_mapped_type(self, mapped_type: TypeMapping) -> None:
+    def register_mapped_type(self, mapped_type: TypeMapping[Any, Any]) -> None:
         existing = self._registered_types.get(mapped_type.target_type)
         if existing is not None:
             raise ValueError(f"The type {existing} is already registered")
         self._registered_types[mapped_type.target_type] = mapped_type
+
+    def get_mapped_type_from_target_type(
+        self,
+        mapped_type: Type[T],
+    ) -> Optional[TypeMapping[Any, T]]:
+        return self._registered_types.get(mapped_type)
 
     def discard_mapped_type(self, mapped_type: Type[T]) -> None:
         del self._registered_types[mapped_type]
@@ -732,11 +545,16 @@ class ParserGenerator:
         path: str,
         *,
         parser_documentation: Optional[ParserDocumentation] = None,
+        expected_debputy_integration_mode: Optional[
+            Container[DebputyIntegrationMode]
+        ] = None,
     ) -> None:
         assert path not in self._in_package_context_parser
         assert path not in self._object_parsers
         self._object_parsers[path] = DispatchingObjectParser(
-            path, parser_documentation=parser_documentation
+            path,
+            parser_documentation=parser_documentation,
+            expected_debputy_integration_mode=expected_debputy_integration_mode,
         )
 
     def add_in_package_context_parser(
@@ -772,6 +590,12 @@ class ParserGenerator:
         source_content: Optional[SF] = None,
         allow_optional: bool = False,
         inline_reference_documentation: Optional[ParserDocumentation] = None,
+        expected_debputy_integration_mode: Optional[
+            Container[DebputyIntegrationMode]
+        ] = None,
+        automatic_docs: Optional[
+            Mapping[Type[Any], Sequence[StandardParserAttributeDocumentation]]
+        ] = None,
     ) -> DeclarativeInputParser[TD]:
         """Derive a parser from a TypedDict
 
@@ -900,6 +724,10 @@ class ParserGenerator:
           should set this to True.  Though, in 99.9% of all cases, you want `NotRequired` rather than `Optional` (and
           can keep this False).
         :param inline_reference_documentation: Optionally, programmatic documentation
+        :param expected_debputy_integration_mode: If provided, this declares the integration modes where the
+          result of the parser can be used. This is primarily useful for "fail-fast" on incorrect usage.
+          When the restriction is not satisfiable, the generated parser will trigger a parse error immediately
+          (resulting in a "compile time" failure rather than a "runtime" failure).
         :return: An input parser capable of reading input matching the TypedDict(s) used as reference.
         """
         orig_parsed_content = parsed_content
@@ -926,6 +754,7 @@ class ParserGenerator:
                 parser = ListWrappedDeclarativeInputParser(
                     parser,
                     inline_reference_documentation=inline_reference_documentation,
+                    expected_debputy_integration_mode=expected_debputy_integration_mode,
                 )
             return parser
 
@@ -934,7 +763,7 @@ class ParserGenerator:
                 f"Unsupported parsed_content descriptor: {parsed_content.__qualname__}."
                 ' Only "TypedDict"-based types and a subset of "DebputyDispatchableType" are supported.'
             )
-        if is_list_wrapped:
+        if is_list_wrapped and source_content is not None:
             if get_origin(source_content) != list:
                 raise ValueError(
                     "If the parsed_content is a List type, then source_format must be a List type as well."
@@ -1089,15 +918,21 @@ class ParserGenerator:
                 parsed_alt_form.type_validator.combine_mapper(bridge_mapper)
             )
 
-        _verify_inline_reference_documentation(
-            source_content_attributes,
-            inline_reference_documentation,
-            parsed_alt_form is not None,
+        inline_reference_documentation = (
+            _verify_and_auto_correct_inline_reference_documentation(
+                parsed_content,
+                source_typed_dict,
+                source_content_attributes,
+                inline_reference_documentation,
+                parsed_alt_form is not None,
+                automatic_docs,
+            )
         )
         if non_mapping_source_only:
             parser = DeclarativeNonMappingInputParser(
                 assume_not_none(parsed_alt_form),
                 inline_reference_documentation=inline_reference_documentation,
+                expected_debputy_integration_mode=expected_debputy_integration_mode,
             )
         else:
             parser = DeclarativeMappingInputParser(
@@ -1110,9 +945,13 @@ class ParserGenerator:
                 at_least_one_of=at_least_one_of,
                 inline_reference_documentation=inline_reference_documentation,
                 path_hint_source_attributes=tuple(path_hint_source_attributes),
+                expected_debputy_integration_mode=expected_debputy_integration_mode,
             )
         if is_list_wrapped:
-            parser = ListWrappedDeclarativeInputParser(parser)
+            parser = ListWrappedDeclarativeInputParser(
+                parser,
+                expected_debputy_integration_mode=expected_debputy_integration_mode,
+            )
         return parser
 
     def _as_type_validator(
@@ -1651,45 +1490,133 @@ class ParserGenerator:
         return orig_td
 
 
-def _verify_inline_reference_documentation(
+def _sort_key(attr: StandardParserAttributeDocumentation) -> Any:
+    key = next(iter(attr.attributes))
+    return attr.sort_category, key
+
+
+def _apply_std_docs(
+    std_doc_table: Optional[
+        Mapping[Type[Any], Sequence[StandardParserAttributeDocumentation]]
+    ],
+    source_format_typed_dict: Type[Any],
+    attribute_docs: Optional[Sequence[ParserAttributeDocumentation]],
+) -> Optional[Sequence[ParserAttributeDocumentation]]:
+    if std_doc_table is None or not std_doc_table:
+        return attribute_docs
+
+    has_docs_for = set()
+    if attribute_docs:
+        for attribute_doc in attribute_docs:
+            has_docs_for.update(attribute_doc.attributes)
+
+    base_seen = set()
+    std_docs_used = []
+
+    remaining_bases = set(getattr(source_format_typed_dict, "__orig_bases__", []))
+    base_seen.update(remaining_bases)
+    while remaining_bases:
+        base = remaining_bases.pop()
+        new_bases_to_check = {
+            x for x in getattr(base, "__orig_bases__", []) if x not in base_seen
+        }
+        remaining_bases.update(new_bases_to_check)
+        base_seen.update(new_bases_to_check)
+        std_docs = std_doc_table.get(base)
+        if std_docs:
+            for std_doc in std_docs:
+                if any(a in has_docs_for for a in std_doc.attributes):
+                    # If there is any overlap, do not add the docs
+                    continue
+                has_docs_for.update(std_doc.attributes)
+                std_docs_used.append(std_doc)
+
+    if not std_docs_used:
+        return attribute_docs
+    docs = sorted(std_docs_used, key=_sort_key)
+    if attribute_docs:
+        # Plugin provided attributes first
+        c = list(attribute_docs)
+        c.extend(docs)
+        docs = c
+    return tuple(docs)
+
+
+def _verify_and_auto_correct_inline_reference_documentation(
+    parsed_content: Type[TD],
+    source_typed_dict: Type[Any],
     source_content_attributes: Mapping[str, AttributeDescription],
     inline_reference_documentation: Optional[ParserDocumentation],
     has_alt_form: bool,
-) -> None:
-    if inline_reference_documentation is None:
-        return
-    attribute_doc = inline_reference_documentation.attribute_doc
-    if attribute_doc:
+    automatic_docs: Optional[
+        Mapping[Type[Any], Sequence[StandardParserAttributeDocumentation]]
+    ] = None,
+) -> Optional[ParserDocumentation]:
+    orig_attribute_docs = (
+        inline_reference_documentation.attribute_doc
+        if inline_reference_documentation
+        else None
+    )
+    attribute_docs = _apply_std_docs(
+        automatic_docs,
+        source_typed_dict,
+        orig_attribute_docs,
+    )
+    if inline_reference_documentation is None and attribute_docs is None:
+        return None
+    changes = {}
+    if attribute_docs:
         seen = set()
-        for attr_doc in attribute_doc:
+        had_any_custom_docs = False
+        for attr_doc in attribute_docs:
+            if not isinstance(attr_doc, StandardParserAttributeDocumentation):
+                had_any_custom_docs = True
             for attr_name in attr_doc.attributes:
                 attr = source_content_attributes.get(attr_name)
                 if attr is None:
                     raise ValueError(
-                        f'The inline_reference_documentation references an attribute "{attr_name}", which does not'
-                        f" exist in the source format."
+                        f"The inline_reference_documentation for the source format of {parsed_content.__qualname__}"
+                        f' references an attribute "{attr_name}", which does not exist in the source format.'
                     )
                 if attr_name in seen:
                     raise ValueError(
-                        f'The inline_reference_documentation has documentation for "{attr_name}" twice,'
-                        f" which is not supported.  Please document it at most once"
+                        f"The inline_reference_documentation for the source format of {parsed_content.__qualname__}"
+                        f' has documentation for "{attr_name}" twice, which is not supported.'
+                        f" Please document it at most once"
                     )
                 seen.add(attr_name)
-
         undocumented = source_content_attributes.keys() - seen
         if undocumented:
-            undocumented_attrs = ", ".join(undocumented)
-            raise ValueError(
-                "The following attributes were not documented.  If this is deliberate, then please"
-                ' declare each them as undocumented (via undocumented_attr("foo")):'
-                f" {undocumented_attrs}"
-            )
+            if had_any_custom_docs:
+                undocumented_attrs = ", ".join(undocumented)
+                raise ValueError(
+                    f"The following attributes were not documented for the source format of"
+                    f" {parsed_content.__qualname__}.  If this is deliberate, then please"
+                    ' declare each them as undocumented (via undocumented_attr("foo")):'
+                    f" {undocumented_attrs}"
+                )
+            combined_docs = list(attribute_docs)
+            combined_docs.extend(undocumented_attr(a) for a in sorted(undocumented))
+            attribute_docs = combined_docs
 
-    if inline_reference_documentation.alt_parser_description and not has_alt_form:
+    if attribute_docs and orig_attribute_docs != attribute_docs:
+        assert attribute_docs is not None
+        changes["attribute_doc"] = tuple(attribute_docs)
+
+    if (
+        inline_reference_documentation is not None
+        and inline_reference_documentation.alt_parser_description
+        and not has_alt_form
+    ):
         raise ValueError(
             "The inline_reference_documentation had documentation for an non-mapping format,"
             " but the source format does not have a non-mapping format."
         )
+    if changes:
+        if inline_reference_documentation is None:
+            inline_reference_documentation = reference_documentation()
+        return inline_reference_documentation.replace(**changes)
+    return inline_reference_documentation
 
 
 def _check_conflicts(

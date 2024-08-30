@@ -1,12 +1,12 @@
 import dataclasses
 from enum import Enum
-from typing import List, Callable, Optional, Sequence
+from typing import List, Callable, Optional, Sequence, Any, Self, Mapping
 
 from debian.debian_support import DpkgArchTable
 
 from debputy._deb_options_profiles import DebBuildOptionsAndProfiles
 from debputy.architecture_support import DpkgArchitectureBuildProcessValuesTable
-from debputy.manifest_parser.base_types import DebputyDispatchableType
+from debputy.manifest_parser.tagging_types import DebputyDispatchableType
 from debputy.packages import BinaryPackage
 from debputy.substitution import Substitution
 from debputy.util import active_profiles_match
@@ -15,10 +15,13 @@ from debputy.util import active_profiles_match
 @dataclasses.dataclass(slots=True, frozen=True)
 class ConditionContext:
     binary_package: Optional[BinaryPackage]
-    build_env: DebBuildOptionsAndProfiles
+    deb_options_and_profiles: DebBuildOptionsAndProfiles
     substitution: Substitution
     dpkg_architecture_variables: DpkgArchitectureBuildProcessValuesTable
     dpkg_arch_query_table: DpkgArchTable
+
+    def replace(self, /, **changes: Any) -> "Self":
+        return dataclasses.replace(self, **changes)
 
 
 class ManifestCondition(DebputyDispatchableType):
@@ -72,6 +75,7 @@ class NegatedManifestCondition(ManifestCondition):
     __slots__ = ("_condition",)
 
     def __init__(self, condition: ManifestCondition) -> None:
+        super().__init__()
         self._condition = condition
 
     def negated(self) -> "ManifestCondition":
@@ -107,6 +111,7 @@ class ManifestConditionGroup(ManifestCondition):
         match_type: _ConditionGroupMatchType,
         conditions: Sequence[ManifestCondition],
     ) -> None:
+        super().__init__()
         self.match_type = match_type
         self._conditions = conditions
 
@@ -132,6 +137,7 @@ class ArchMatchManifestConditionBase(ManifestCondition):
     __slots__ = ("_arch_spec", "_is_negated")
 
     def __init__(self, arch_spec: List[str], *, is_negated: bool = False) -> None:
+        super().__init__()
         self._arch_spec = arch_spec
         self._is_negated = is_negated
 
@@ -177,6 +183,7 @@ class BuildProfileMatch(ManifestCondition):
     __slots__ = ("_profile_spec", "_is_negated")
 
     def __init__(self, profile_spec: str, *, is_negated: bool = False) -> None:
+        super().__init__()
         self._profile_spec = profile_spec
         self._is_negated = is_negated
 
@@ -190,7 +197,7 @@ class BuildProfileMatch(ManifestCondition):
 
     def evaluate(self, context: ConditionContext) -> bool:
         match = active_profiles_match(
-            self._profile_spec, context.build_env.deb_build_profiles
+            self._profile_spec, context.deb_options_and_profiles.deb_build_profiles
         )
         return not match if self._is_negated else match
 
@@ -211,7 +218,14 @@ def _can_run_built_binaries(context: ConditionContext) -> bool:
     if not context.dpkg_architecture_variables.is_cross_compiling:
         return True
     # User / Builder asserted that we could even though we are cross-compiling, so we have to assume it is true
-    return "crossbuildcanrunhostbinaries" in context.build_env.deb_build_options
+    return (
+        "crossbuildcanrunhostbinaries"
+        in context.deb_options_and_profiles.deb_build_options
+    )
+
+
+def _run_build_time_tests(deb_build_options: Mapping[str, Optional[str]]) -> bool:
+    return "nocheck" not in deb_build_options
 
 
 _IS_CROSS_BUILDING = _SingletonCondition(
@@ -226,12 +240,12 @@ _CAN_EXECUTE_COMPILED_BINARIES = _SingletonCondition(
 
 _RUN_BUILD_TIME_TESTS = _SingletonCondition(
     "Run build time tests",
-    lambda c: "nocheck" not in c.build_env.deb_build_options,
+    lambda c: _run_build_time_tests(c.deb_options_and_profiles.deb_build_options),
 )
 
 _BUILD_DOCS_BDO = _SingletonCondition(
     "Build docs (nodocs not in DEB_BUILD_OPTIONS)",
-    lambda c: "nodocs" not in c.build_env.deb_build_options,
+    lambda c: "nodocs" not in c.deb_options_and_profiles.deb_build_options,
 )
 
 

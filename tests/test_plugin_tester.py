@@ -1,6 +1,6 @@
 import json
 import os.path
-from typing import List, Tuple, Type, cast
+from typing import List, Tuple, Type, cast, TYPE_CHECKING
 
 import pytest
 
@@ -24,6 +24,13 @@ from debputy.plugin.api.test_api.test_impl import (
     initialize_plugin_under_test_preloaded,
     initialize_plugin_under_test_from_inline_json,
 )
+
+if TYPE_CHECKING:
+    from debputy.plugin.api import PluginInitializationEntryPoint
+
+    # Irrelevant, but makes the import not "unused" for things that does not parse `cast("...", ...)` expressions
+    assert PluginInitializationEntryPoint is not None
+
 
 CUSTOM_PLUGIN_JSON_FILE = os.path.join(
     os.path.dirname(__file__), "data", "custom-plugin.json.in"

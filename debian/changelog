@@ -1,3 +1,506 @@
+debputy (0.1.48) unstable; urgency=medium
+
+  * INTEGRATION-MODES.md: Correct `bullseye` that should have been `bookworm`
+  * Also set PKG_CONFIG in the `perl-build` build system like with
+    is done in the `perl-makemaker` build system.
+  * Remove lintian-overrides since `debputy` no longer uses `dh`
+  * d/control: Fix typo in description
+  * debputy.pod: Document security aspects of `debputy lsp server`
+    and `debputy lint`.
+  * debputy: Fix inaccurate directory listing in an error message.
+  * debputy: Ensure `u+rwX` as min mode when installing paths into the
+    packages. This change prevent crashes when upstream has marked
+    paths as read-only (such as `0444`).
+    Thanks to Andrey Rakhmatullin <wrar@debian.org> (Closes: #1078906)
+    Note: Paths can still get their user write bit removed via
+    transformations or built-in rules (such as files in `etc/sudoers.d`
+    which must be `0440`)
+  * debputy: Require directory mode to always have `u+rwx`. Previously,
+    only the `u+rx` mode was required. There is no known use-case for
+    directories to not have a read, write and execute for the owner.
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 18 Aug 2024 09:47:40 +0000
+
+debputy (0.1.47) unstable; urgency=medium
+
+  * LSP/Lint:
+    - Fix missing textwrap.dedent for hover docs
+    - Tweak wording for undocumented fields
+    - Tweak wording for the `important` value from `Priority`
+    - Tweak rendering of header of hover docs for known value
+    - In hover docs, recognize `debputy-plugin-X` similar to `dh-sequence-Y`
+    - Make a d/changelog diagnostic message a bit more precise
+
+  * migrate-from-dh:
+    - Add remark about https://bugs.debian.org/1067653 in relevant
+      warnings.
+
+  * Expand documentation on integration modes (Closes: debputy#117)
+  * debputy: Fix a warning from auto-detecting when the source
+    package has no `debhelper` compat level.
+  * debputy: Restore log output from `pygls` (`debputy lsp server`)
+
+
+ -- Niels Thykier <niels@thykier.net>  Tue, 13 Aug 2024 12:44:52 +0000
+
+debputy (0.1.46) unstable; urgency=medium
+
+  * LSP:
+    - Improve wording of and fix typo in hover docs.
+    - Fix a typo of `hyphen-` that would distrupt "name to section"
+      checks for `hyphen-` packages.
+
+  [ Niels Thykier ]
+  * LSP: Fix typo of `hyphen-` and improve wording `Multi-Arch` field
+  * debputy: Hoist `nocheck` and `nodoc` into `DEB_BUILD_OPTIONS`
+    Thanks to Chris Hofstaedtler <zeha@debian.org>
+  * Skip `debian/foo.1` for packager provided files typo checks.
+    Thanks to Chris Hofstaedtler <zeha@debian.org>
+  * Set `PKG_CONFIG` ENV var for  `perl-makemaker`
+  * Fix bug in initialization of `EnvironmentModification` (only affects
+    packages in `full` integration mode).
+  * Fix bug in escape_util and have it use more readable output by default
+  * Fix bug where pre-compressed manpage would be corrupted.
+    Thanks to Andrey Rakhmatullin <wrar@debian.org> (Closes: #1078448)
+
+  [ Guillem Jover ]
+  * LSP: Fix typos in several descriptions
+
+
+ -- Niels Thykier <niels@thykier.net>  Sat, 10 Aug 2024 18:16:23 +0000
+
+debputy (0.1.45) unstable; urgency=medium
+
+  * Manifest:
+    - Add new `default-build-environment`, `build-environments` and `build-rules`
+      for the new `full` integration mode where `debhelper` is no longer driving
+      the build.
+    - Port all `debhelper` provided build systems to have an native `debputy`
+      counter part with a few tweaks.
+
+
+  * LSP/Lint:
+    - Add `xpm` as a known extension for packager files
+    - Add `Build-Driver` as a known field for `debian/control`.
+    - Add `Files-Excluded` and `Files-Included` as known fields for DEP-5
+    - Quote values in completation items for the manifest. This means that
+      the value for `manifest-version` is now properly YAML quoted.
+
+  * debputy: Remove `--spellcheck` from "random" subcommands
+  * debputy: Fix missing warning with `--debug` (it was supposed to be omitted,
+    but never was due to exception flow).
+  * debputy reformat: Fix bug where orphaned packages would have a style by
+    default
+  * doc: Document decision on plugin module import vs. initialization design
+  * LSP/Lint: Fix crash with certain field being duplicated
+  * MANIFEST-FORMAT.md: Fix wording
+  * Add initial minimal `Build-Driver` support meaning that `debputy` can now use
+    `dpkg-buildpackage`'s new `Build-Driver` support to drive the build without
+    relying on `dh`. This requires bleeding edge features in `dpkg-buildpackage`
+    and `debputy`.
+  * Avoid stacktrace for CTRL + C during `run_command`
+  * Improve error tracking related to plugins
+  * Add remark about `env:` manifest variables sometimes respecting
+    `build-environment`.
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 04 Aug 2024 12:37:21 +0000
+
+debputy (0.1.44) unstable; urgency=medium
+
+  * LSP:
+    - Provide hover docs for packages in relationship fields. Due to
+      implementation limitations, OR relations (`foo | bar`) do not
+      work. The hover doc relies on the system's APT cache with all
+      the limitations from that (like the data not matching the target
+      distribution)
+    - Fix wording in the synopsis hover doc
+
+  * debputy reformat: If possible provide the reformatting tool when the
+    style cannot be applied.
+  * debputy: Remove `printf` debug when log level is changed
+  * debputy: Prefer using line numbers in error messages when available
+  * editor-config: Improve the LSP config for `eglot`
+  * debputy: Improve mode correction for `*.pm` files.
+    Thanks to Russ Allbery <rra@debian.org> (Closes: #1076346)
+
+ -- Niels Thykier <niels@thykier.net>  Mon, 15 Jul 2024 11:24:40 +0000
+
+debputy (0.1.43) unstable; urgency=medium
+
+  * debputy: Only warn about missing `-dev` SO symlinks for libraries
+    in common lib paths (such as usr/lib/${MA})
+  * debputy: Fix bug where `DH_VERBOSE` would fail to print all
+    commands
+  * debputy: Distinguish between `--debug` and `DH_VERBOSE` in terms
+    of verbosity.
+  * debputy: Restore `Multi-Arch: same` field in dbgsym packages.
+    Thanks to Russ Allbery <rra@debian.org>
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 07 Jul 2024 07:18:46 +0000
+
+debputy (0.1.42) unstable; urgency=medium
+
+  * LSP/Lint:
+    - Fix exception on some syntax errors
+    - Add `X?-Ruby-Versions` as a known (obsolete) field
+    - Include the final line of context (`debputy lint`-only)
+    - Syntax check dependency relation fields
+    - Detect incorrect version operators in `Provides`
+    - Fix crash on package stanzas without `Package` field
+    - Flag usage of `|` in relationship fields that does not
+      support it
+    - Fix invalid ranges for some checks when using field comments
+
+ -- Niels Thykier <niels@thykier.net>  Sat, 06 Jul 2024 18:50:17 +0000
+
+debputy (0.1.41) unstable; urgency=medium
+
+  * LSP/Lint:
+    - Fix typo in diagnostic message
+    - Reduce the number of false positive pkgfile typo warnings.
+      Thanks to Otto Kekäläinen <otto@debian.org> (Closes: debputy#109)
+    - Avoid recommending name segment for packaging files that do not
+      support that.  Note all `debhelper` files currently "support"
+      name segments as far as `debputy` can tell, since `dh_assistant`
+      does not track this feature.
+  * debputy reformat: Fix error in instructions
+  * debputy-documentation.json: Add `debian/lintian-brush.conf` as
+    known file.
+
+ -- Niels Thykier <niels@thykier.net>  Tue, 02 Jul 2024 20:52:51 +0000
+
+debputy (0.1.40) unstable; urgency=medium
+
+  * Manifest changes:
+    - The manifest parser now validates the used features against the
+      integration mode. This causes some invalid manifests to be
+      detected at parse time (`debputy manifest`) rather than at
+      build time for `dh-sequence-zz-debputy-rrr`).
+
+  * LSP/Lint:
+    - Use `dh_assistant` to determine inactive commands. This improves
+      the check to cover commands that `debhelper` knows are inactive.
+      However, the functionality now requires `debhelper (>= 13.15~)`.
+    - Apply sequences from `debian/control` when analyzing `debian/rules`.
+      Note for LSP: Depending on your editor, you may have to save
+      `debian/control` first and then trigger a change in `debian/rules`
+      for it to be visible. (Known issue, see debputy#103 and debputy#108)
+    - Provide inlay hints for inherited fields in `debian/control`.
+    - Provide integration mode level checks for most features. The
+      capabilities on `path-metadata` is a known and notable case where
+      the LSP/Lint side is silent where `debputy check-manifest` would
+      complain.
+    - Provide a warning for unknown capabilities (that `cap_from_text`
+      does not recognize). Previously, this would only appear in
+      `debputy check-manifest` or during builds.
+    - Validate boolean and enum-like values for attributes of the
+      manifest. These would previously only be caught by
+      `debputy check-manifest` or during builds.
+
+  * debputy: Remove internal `--integration-mode=rrr` option.
+  * dh_debputy: Remove internal `--integration-mode=rrr` option.
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 30 Jun 2024 12:43:55 +0000
+
+debputy (0.1.39) unstable; urgency=medium
+
+  * LSP/Lint:
+    - Reference wiki.d.o/PackageTransition for `Breaks`, `Conflicts` and
+      `Replaces` hover docs.
+    - Fix false-positive "unused `symbols` file". Thanks to
+      Otto Kekäläinen <otto@debian.org> (Closes: debputy#107)
+
+  * debputy: `lsp features` now works even without minimum requires installed
+
+ -- Niels Thykier <niels@thykier.net>  Mon, 24 Jun 2024 07:52:09 +0000
+
+debputy (0.1.38) unstable; urgency=medium
+
+  * LSP/Lint:
+    - Avoid self-DOS when checking packaging file names
+    - Perform more checks of packaging files
+    - Ignore `fundamental` language ID (from `emacs`'s `fundamental-mode`)
+  * debputy: Explicitly state how to see the editor snippets in the list of
+    snippets
+  * debputy: Special-case the file-level range in the output in the
+    `junit4-xml` output format for `debputy lint`.
+  * Fix matching of packager provided files for some corner cases. As a
+    side-effect, some more corner cases of typos of the name stem are
+    now detected by the LSP/Lint and annotate-debian-directory code
+    when `python3-levenshtein` is installed. As an example,
+    `foo.uxxr.service` can now be reported as a typo of `user.service`
+    (for `dh_installsystemduser`) where it was previously considered a
+    `service` file with a name segment of `uxxr` (for `dh_installsystemd`).
+    Though, this only happens subcommands that active look for typos
+    (such as the LSP/Lint part) and only when `python3-levenshtein` is
+    enabled (check `debputy lsp features` for the `typo detection`).
+
+ -- Niels Thykier <niels@thykier.net>  Thu, 20 Jun 2024 05:54:24 +0000
+
+debputy (0.1.37) unstable; urgency=medium
+
+  * LSP/Lint:
+    - Provide `sort text` for some completion suggestions to have
+      editors promote or demote certain values. Example being `allowed`,
+      which is rarely used and is now demoted below other options.
+    - Provide synopsis docs for various completion suggestions related
+      to field values.
+    - Provide a diagnostic for a "directory-only" match used in a
+      `Files` field of `debian/copyright'.
+    - Provide a diagnostic for `debhelper` config files and PPFs that
+      uses a name segment without an explicit package prefix. These
+      are possible typos of a real package name and additionally, they
+      are deprecated in debhelper compat 14 (removal planned for compat
+      15). Note that `debputy` did not allow name segments without
+      explicit package prefix for the PPFs it supported, so this
+      should only affect `debhelper` packages.
+    - Provide a diagnostic for 'debhelper` config files and PPFs that
+      used by commands not active in the `dh` sequence given the
+      current set of add-ons. This only applies to packages using
+      `dh` and relies 100% on `dh_assistant` providing useful data
+      for the package in question. For this feature to work,
+      `debhelper (>= 13.16~)` is needed. With older versions of
+      `debhelper` the check is silently disabled.
+    - Detect some typos in the "stem" part of debhelper config files
+      and PPFs (both `debputy` and `debhelper` provided PPFs).
+      Due to a technical limitation, the check only works when
+      there is exactly one match for the stem within
+      "typo edit distance". This means that typos of some stems
+      are likely to be unreported. A trivial example is the
+      typo `debian/dcos`, which is equally close to `debian/docs` and
+      `debian/dirs`.
+
+
+  * Update salsa CI configuration to better support backports
+  * Fix bug in handling absence of `python3-lsprotocol` in unstable
+  * Add missing help descriptions to `lint` and `reformat`
+  * Add a `debian/clean` to remove files after "rules-less" experiments
+  * debputy: `debputy lsp features` now reports if a newer version of
+    `debhelper` would help or provide improve support. Currently, the
+    lowest bound for passing is now `debhelper (>= 13.16~)`. The bound
+    may be bumped in the future as the need arises.
+
+ -- Niels Thykier <niels@thykier.net>  Mon, 17 Jun 2024 16:07:04 +0000
+
+debputy (0.1.36) unstable; urgency=medium
+
+  * LSP/Lint: Basic detection of hook targets that will not be run
+    with `debputy` sequences (debputy#103). Known issues are:
+      - The check does not account for sequences loaded via
+        `debian/rules`.
+      - The diagnostics does not automatically refresh in the
+        language server when changing `debian/control`. The work
+        around is to do a minor change to `debian/rules` to
+        re-trigger it.
+  * Internal refactoring of linter and LSP to make it easier to
+    make some build-dependencies fully optional, which in turn
+    makes backporting `debputy` to bookworm-backports a lot easier.
+  * debian/control: Mark some build-dependencies unnecessary for
+    bookworm-backports via a package specific build profile.
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 09 Jun 2024 11:45:02 +0000
+
+debputy (0.1.35) unstable; urgency=medium
+
+  [ Niels Thykier ]
+  * Manifest:
+    - Fix inverted boolean logic causing `path-metadata` to reject matched
+      directories when it should have allowed the match.
+
+  * LSP/Lint:
+    - In regex based validation, ignore values with substvars to avoid
+      false positives.
+    - Fix typo in hover doc
+    - Fix two minor bugs (an out of bounds and None exception)
+    - Avoid double colon when completion YAML keys and there was already
+      a colon.
+    - Fix a bug where the YAML completion would not work properly if there was
+      any content on the line after the current line.
+
+
+  * debputy: Considerably reduce the output during package build by:
+    - Do not announce loading of bundled plugins
+    - Avoid unnecessary output related to installations (like search dir and
+      discard rules) for `rrr` integration mode.
+    - Reduce the log level to `warning` by default from info (other subcommands
+      still start on `info` level by default). In the `debhelper` integration
+      modes, `export DH_VERBOSE=1` will restore the `info` level logging.
+    - Guard some information (such as most commands being run) beyond info
+      logging.
+
+  [ Colin Watson ]
+  * LSP/Lint: Fix section for python3-zope.*
+
+ -- Niels Thykier <niels@thykier.net>  Wed, 05 Jun 2024 17:33:57 +0000
+
+debputy (0.1.34) unstable; urgency=medium
+
+  * LSP/Lint:
+    - Improve Synopsis hover docs by using a wording closer to
+      DevRef 6.2.2 and provide a reference example for comparison.
+    - Detect some issues with the Synopsis of package description.
+      Example include detecting known placeholders, the synopsis being
+      too short (single word), and the synopsis starting with an
+      article.
+    - Avoid emitting diagnostic for missing `Standards-Version` when
+      the source package only produces `udebs`.
+    - Limit diagnostics of `debian/changelog` to the first two issues
+      (Closes: debputy#92)
+    - The `black` style no longer normalizes stanza order. Instead,
+      current order is preserved as-is.
+    - Fix negated architectures being considered a typo. This is a quick
+      fix that side-steps the issue. However, the current solution should
+      be replaced by a specialized diagnostic logic for `Architecture`.
+      Thanks to
+      Picca Frédéric-Emmanuel <frederic-emmanuel.picca@synchrotron-soleil.fr>
+      for reporting the issue.
+
+  * debputy: Support `junit` report format for the `lint` subcommand.
+    (Closes: debputy#99)
+  * d/control: Have `dh-debputy` provide `debputy` for now to simplify
+    installation. The documentation still uses `dh-debputy` until such
+    a time where it makes sense to create a standalone `debputy` package.
+  * Improve support for `dwz` being missing to match `debhelper`
+
+ -- Niels Thykier <niels@thykier.net>  Tue, 21 May 2024 14:48:10 +0000
+
+debputy (0.1.33) unstable; urgency=medium
+
+  * LSP/Lint:
+    - Check `Files` in debian/copyright for unnecessary syntactical segments.
+    - Add basic validation of `Standards-Version` field (like out of date
+      Standards-Version or incorrect format)
+    - Add support for `debian/patches/series`. Note that for the LSP support
+      you will probably need `--ignore-language-ids` for it to activate.
+      Current features are:
+      + Semantic tokens: Comments + Patches (as "String") are matched.
+        Some patch options are marked too.
+      + Diagnostics: Patches not mentioned, non-existent patches, duplicate
+        patches, patches not ending with .diff/.patch (to aid editor
+        support), and syntax issues.
+      + Completion: Patch names are completed. Option completion is not
+        supported (but `debian/patches/series` only allows `-p1` which
+        is redundant).
+    - Packages with multiple `Vcs-*` fields (ignoring `Vcs-Browser`) now
+      triggers a diagnostic.
+    - Linter (but not LSP) now has a separate severity for spelling issues
+      called `spelling`. It works like the previous severity for all intents
+      and purposes, it is just a different name for the same severity.
+
+  * d/control: Bump Standards-Version to 4.7.0 - no changes required
+  * Add basic `grantlee` packaging plugin to match the `debhelper`
+    sequence add-on of same name.
+
+ -- Niels Thykier <niels@thykier.net>  Thu, 09 May 2024 10:43:23 +0000
+
+debputy (0.1.32) unstable; urgency=medium
+
+  * LSP/Lint:
+    - Fix bug where `d/copyright` and `d/tests/control` was read as `d/control`
+      in `debputy lsp server` (`debputy lint` was unaffected).
+    - Fix bug in `in_range` detection that was sometimes completely off. This
+      could cause incorrect hover docs or completion suggestions to appear.
+      Admittedly, the above bug almost makes this one seem like a non-issue
+      in comparison.
+    - Support completing filenames in `Files` fields of `debian/copyright`.
+  * debputy reformat: Provide separate message for no style vs. unsupported
+    style
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 05 May 2024 12:41:27 +0000
+
+debputy (0.1.31) unstable; urgency=medium
+
+  * LSP/Lint:
+    - Read `wrap-and-sort` args from `salsa-ci` as fallback
+    - Prune more fields and values in the deb822 completer based on
+      the context. As an example, `same` is no longer suggested as
+      a completion for `Multi-Arch` if the package is
+      `Architecture: all`. (Closes: debputy#88)
+    - Flag `X-Time64-Compat` as an issue in `Architecture: all`
+      packages.
+    - Update hover doc for `M-A: allowed` to clarify how rare it is
+      (less than 0.5%, down to 0.05% for `Architecture: all`).
+
+  [ Niels Thykier ]
+  * d/control: Allow `python3-ruamel.yaml` as alternative
+  * CI: Add CI tests to validate Ubuntu/noble works
+  * debputy reformat: Add option to not error out on missing styles
+
+  [ Maytham Alsudany ]
+  * LSP: Update Section reference data to include `golang` and `httpd`.
+
+ -- Niels Thykier <niels@thykier.net>  Sat, 04 May 2024 11:18:18 +0000
+
+debputy (0.1.30) unstable; urgency=medium
+
+  * LSP/Lint:
+    - Detect duplicate separators (commas) in most fields
+    - Fix typo in hover doc for `DM-Upload-Allowed`
+    - Support `X-Style: black` as style declaration to activate
+      automatic reformatting support. Conceptually, this is similar
+      to `wrap-and-sort -satkb` but it may evolve over time.
+    - Support reformatting of field contents on save or via explicit
+      reformat document request from editor (requires that `debputy`
+      knows which style you want - see previous entry for how to do
+      a per-package rule).
+    - Update `emacs+eglot` editor config snippet after the latest
+      elpa-dpkg-dev-el upload.
+
+  * Fix crash bug in embedded python3-debian code
+  * Declare styles for:
+    - Niels Thykier (black)
+    - Chris Hofstaedtler (black)
+
+  * style-prefs.yaml: Adding format rules for several packages
+  * Apply `debian black` style to `d/tests/control`
+  * Fix duplicate stderr logger with LSP (and similar commands)
+  * Fix invalid assertion error in some packages (Closes: #1069362)
+  * Cope better with `python3-colored (<< 2)`
+    Thanks to Chris Hofstaedtler <zeha@debian.org>
+  * Provide a new reformat subcommand. It works like `debputy lint`, but
+    only does formatting (which `debputy lint` does none of).
+  * debputy lint: Fix crash bug on missing `Source` field in `d/control`
+  * debputy: Make `lint` and `check-manifest' quieter to support
+    `pre-commit` hook
+
+ -- Niels Thykier <niels@thykier.net>  Sun, 28 Apr 2024 13:21:45 +0000
+
+debputy (0.1.29) unstable; urgency=medium
+
+  * LSP/Lint:
+    - The hover docs for a substvar like `${foo:Depends}` will now mention
+      that it is a "relationship substvar" and how it is redundant with
+      bleeding edge package helpers.
+    - Provide docs for many Completion suggestions in `d/control` and
+      `d/tests/control`
+    - Improve semantic token support for deb822 files to cover react
+      to known values, inter-stanza comments, field comments and in-field
+      value comments for known fields. In-field value comments for
+      unknown fields are still not marked as comments.
+    - Detect all mismatches between package name and section. Previously,
+      only `-udeb` packages have its section validated.
+    - The mismatched section diagnostics now provide quick-fixes also
+      when the `Section` field is not provided in the `Package` stanza
+      (or in the `Source` stanza)
+
+  [ Niels Thykier ]
+  * d/copyright: Fix typo of `Apache-2` license
+  * debputy: Support `--ignore-language-ids` in `debputy lsp server`. This
+    is useful for editors that provide language IDs that `debputy` does
+    not recognize, since it will make `debputy` disregard the language
+    ID and fallback to filename based rules. See the extended description
+    in `man debputy` for pros and cons of this option.
+  * Make `--tcp` and `--ws` for `debputy lsp server` mutually exclusive.
+    Previously, one of the options would just be "silently" ignored.
+  * debputy.pod: Document all `debputy lsp server` related command options
+  * LSP: Fix IndexError triggered with `emacs/eglot` in `d/control`
+  * debputy: Fix a warning about unknown "didChange" notifications.
+
+  [ Jochen Sprickerhof ]
+  * `debputy lsp editor-configs`: add `neovim+nvim-lspconfig`
+
+ -- Niels Thykier <niels@thykier.net>  Wed, 24 Apr 2024 18:00:41 +0000
+
 debputy (0.1.28) unstable; urgency=medium
 
   [ Niels Thykier ]
@@ -50,7 +553,7 @@ debputy (0.1.27) unstable; urgency=medium
       by default. The `make` man page strongly implies that it "may"
       run code, which will be unhelpful to anyone using `debputy lint`
       to review packages.
-    - The `debputy.manfiest` diagnostics now flag conflicting
+    - The `debputy.manifest` diagnostics now flag conflicting
       attributes in the manifest. Previously, these were only flagged
       by `debputy check-manifest` or during build.  (Closes: #85)
     - When there is a typo of a keyword in `debputy.manifest` with one

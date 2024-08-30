@@ -1,21 +1,22 @@
 import collections
-from typing import List, Optional, Mapping, Any, Callable
+from typing import List, Optional, Mapping, Any, Callable, Sequence
 
 import pytest
 
+from debputy.filesystem_scan import VirtualPathBase
 from debputy.linting.lint_util import (
-    LinterImpl,
     LinterPositionCodec,
     LintStateImpl,
     LintState,
 )
+from debputy.lsp.maint_prefs import (
+    MaintainerPreferenceTable,
+    EffectiveFormattingPreference,
+)
 from debputy.packages import DctrlParser
 from debputy.plugin.api.feature_set import PluginProvidedFeatureSet
 
-try:
-    from lsprotocol.types import Diagnostic, DiagnosticSeverity
-except ImportError:
-    pass
+from debputy.lsprotocol.types import Diagnostic, DiagnosticSeverity, Range
 
 
 try:
@@ -43,23 +44,33 @@ class LintWrapper:
         self.dctrl_lines: Optional[List[str]] = None
         self.path = path
         self._dctrl_parser = dctrl_parser
+        self.source_root: Optional[VirtualPathBase] = None
+        self.lint_maint_preference_table = MaintainerPreferenceTable({}, {})
+        self.effective_preference: Optional[EffectiveFormattingPreference] = None
 
     def __call__(self, lines: List[str]) -> Optional[List["Diagnostic"]]:
         source_package = None
         binary_packages = None
         dctrl_lines = self.dctrl_lines
         if dctrl_lines is not None:
-            source_package, binary_packages = (
+            _, source_package, binary_packages = (
                 self._dctrl_parser.parse_source_debian_control(
                     dctrl_lines, ignore_errors=True
                 )
             )
+        source_root = self.source_root
+        debian_dir = source_root.get("debian") if source_root is not None else None
         state = LintStateImpl(
             self._debputy_plugin_feature_set,
+            self.lint_maint_preference_table,
+            source_root,
+            debian_dir,
             self.path,
+            "".join(dctrl_lines) if dctrl_lines is not None else "",
             lines,
             source_package,
             binary_packages,
+            self.effective_preference,
         )
         return check_diagnostics(self._handler(state))
 
@@ -76,6 +87,7 @@ def check_diagnostics(
     if diagnostics:
         for diagnostic in diagnostics:
             assert diagnostic.severity is not None
+            assert diagnostic.source is not None
     return diagnostics
 
 
@@ -99,3 +111,18 @@ def group_diagnostics_by_severity(
         by_severity[severity].append(diagnostic)
 
     return by_severity
+
+
+def diag_range_to_text(lines: Sequence[str], range_: "Range") -> str:
+    parts = []
+    for line_no in range(range_.start.line, range_.end.line + 1):
+        line = lines[line_no]
+        chunk = line
+        if line_no == range_.start.line and line_no == range_.end.line:
+            chunk = line[range_.start.character : range_.end.character]
+        elif line_no == range_.start.line:
+            chunk = line[range_.start.character :]
+        elif line_no == range_.end.line:
+            chunk = line[: range_.end.character]
+        parts.append(chunk)
+    return "".join(parts)

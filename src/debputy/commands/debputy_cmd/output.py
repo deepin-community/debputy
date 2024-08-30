@@ -22,6 +22,14 @@ from debputy.util import assume_not_none
 
 try:
     import colored
+
+    if (
+        not hasattr(colored, "Style")
+        or not hasattr(colored, "Fore")
+        or not hasattr(colored, "Back")
+    ):
+        # Seen with python3-colored v1 (bookworm)
+        raise ImportError
 except ImportError:
     colored = None
 
@@ -133,10 +141,10 @@ class OutputStylingBase:
         row_format = f"| {row_format_inner} |"
 
         if self.supports_colors:
-            c = self._color_support
-            assert c is not None
-            header_color = c.Style.bold
-            header_color_reset = c.Style.reset
+            cs = self._color_support
+            assert cs is not None
+            header_color = cs.Style.bold
+            header_color_reset = cs.Style.reset
         else:
             header_color = ""
             header_color_reset = ""
@@ -184,6 +192,9 @@ class OutputStylingBase:
     def render_url(self, link_url: str) -> str:
         return link_url
 
+    def bts(self, bugno) -> str:
+        return f"https://bugs.debian.org/{bugno}"
+
 
 class ANSIOutputStylingBase(OutputStylingBase):
     def __init__(
@@ -218,9 +229,9 @@ class ANSIOutputStylingBase(OutputStylingBase):
         self._check_color(fg)
         self._check_color(bg)
         self._check_text_style(style)
-        if not self.supports_colors:
-            return text
         _colored = self._color_support
+        if not self.supports_colors or _colored is None:
+            return text
         codes = []
         if style is not None:
             code = getattr(_colored.Style, style)
@@ -252,6 +263,25 @@ class ANSIOutputStylingBase(OutputStylingBase):
                 link_url = f"https://manpages.debian.org/{page}.{section}"
         return URL_START + f"{link_url}\a{link_text}" + URL_END
 
+    def bts(self, bugno) -> str:
+        if not self._support_clickable_urls:
+            return super().bts(bugno)
+        return self.render_url(f"https://bugs.debian.org/{bugno}")
+
+
+def no_fancy_output(
+    stream: IO[str] = None,
+    output_format: str = str,
+    optimize_for_screen_reader: bool = False,
+) -> OutputStylingBase:
+    if stream is None:
+        stream = sys.stdout
+    return OutputStylingBase(
+        stream,
+        output_format,
+        optimize_for_screen_reader=optimize_for_screen_reader,
+    )
+
 
 def _output_styling(
     parsed_args: argparse.Namespace,
@@ -262,9 +292,12 @@ def _output_styling(
         output_format = "text"
     optimize_for_screen_reader = os.environ.get("OPTIMIZE_FOR_SCREEN_READER", "") != ""
     if not stream.isatty():
-        return OutputStylingBase(
-            stream, output_format, optimize_for_screen_reader=optimize_for_screen_reader
+        return no_fancy_output(
+            stream,
+            output_format,
+            optimize_for_screen_reader=optimize_for_screen_reader,
         )
+
     return ANSIOutputStylingBase(
         stream, output_format, optimize_for_screen_reader=optimize_for_screen_reader
     )

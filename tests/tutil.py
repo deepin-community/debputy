@@ -1,4 +1,6 @@
-from typing import Tuple, Mapping
+import pytest
+
+from typing import Tuple, Mapping, Any
 
 from debian.deb822 import Deb822
 from debian.debian_support import DpkgArchTable
@@ -8,6 +10,7 @@ from debputy.architecture_support import (
     DpkgArchitectureBuildProcessValuesTable,
 )
 from debputy.packages import BinaryPackage
+from debputy.plugin.api.test_api import DEBPUTY_TEST_AGAINST_INSTALLED_PLUGINS
 
 _DPKG_ARCHITECTURE_TABLE_NATIVE_AMD64 = None
 _DPKG_ARCH_QUERY_TABLE = None
@@ -64,3 +67,10 @@ def _arch_data_tables_loaded() -> (
         # TODO: Make a faked table instead, so we do not have data dependencies in the test.
         _DPKG_ARCH_QUERY_TABLE = DpkgArchTable.load_arch_table()
     return _DPKG_ARCHITECTURE_TABLE_NATIVE_AMD64, _DPKG_ARCH_QUERY_TABLE
+
+
+def build_time_only(func: Any) -> Any:
+    return pytest.mark.skipif(
+        DEBPUTY_TEST_AGAINST_INSTALLED_PLUGINS,
+        reason="Test makes assumptions only valid during build time tests",
+    )(func)

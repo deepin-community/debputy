@@ -1,6 +1,9 @@
 import dataclasses
 import os.path
+import subprocess
 from typing import Callable, Sequence, List, Optional, TypeVar
+
+from debian.debian_support import Version
 
 from debputy.util import _error
 
@@ -24,7 +27,7 @@ def lsp_import_check(
     *,
     feature_name: Optional[str] = None,
     is_mandatory: bool = False,
-):
+) -> Callable[[C], C]:
 
     def _wrapper(func: C) -> C:
 
@@ -43,6 +46,29 @@ def lsp_import_check(
                 _impl,
                 "Missing dependencies",
                 f"Run `apt satisfy '{', '.join(packages)}'` to {suffix}",
+                is_mandatory=is_mandatory,
+            )
+        )
+        return func
+
+    return _wrapper
+
+
+def lsp_generic_check(
+    problem: str,
+    how_to_fix: str,
+    *,
+    feature_name: Optional[str] = None,
+    is_mandatory: bool = False,
+) -> Callable[[C], C]:
+
+    def _wrapper(func: C) -> C:
+        LSP_CHECKS.append(
+            LSPSelfCheck(
+                _feature_name(feature_name, func),
+                func,
+                problem,
+                how_to_fix,
                 is_mandatory=is_mandatory,
             )
         )
@@ -83,7 +109,57 @@ def spell_checking() -> bool:
     )
 
 
-def assert_can_start_lsp():
+@lsp_generic_check(
+    feature_name="extra dh support",
+    problem="Missing dependencies",
+    how_to_fix="Run `apt satisfy debhelper (>= 13.16~)` to enable this feature",
+)
+def check_dh_version() -> bool:
+    try:
+        output = subprocess.check_output(
+            [
+                "dpkg-query",
+                "-W",
+                "--showformat=${Version} ${db:Status-Status}\n",
+                "debhelper",
+            ]
+        ).decode("utf-8")
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return False
+    else:
+        parts = output.split()
+        if len(parts) != 2:
+            return False
+        if parts[1] != "installed":
+            return False
+        return Version(parts[0]) >= Version("13.16~")
+
+
+@lsp_generic_check(
+    feature_name="apt cache packages",
+    problem="Missing apt or empty apt cache",
+    how_to_fix="",
+)
+def check_apt_cache() -> bool:
+    try:
+        output = subprocess.check_output(
+            [
+                "apt-get",
+                "indextargets",
+                "--format",
+                "$(IDENTIFIER)",
+            ]
+        ).decode("utf-8")
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return False
+    for line in output.splitlines():
+        if line.strip() == "Packages":
+            return True
+
+    return False
+
+
+def assert_can_start_lsp() -> None:
     for self_check in LSP_CHECKS:
         if self_check.is_mandatory and not self_check.test():
             _error(

@@ -34,6 +34,39 @@ from debian.deb822 import Deb822
 
 from debputy.architecture_support import DpkgArchitectureBuildProcessValuesTable
 from debputy.exceptions import DebputySubstitutionError
+from debputy.types import EnvironmentModification
+
+try:
+    from Levenshtein import distance
+except ImportError:
+
+    CAN_DETECT_TYPOS = False
+
+    def detect_possible_typo(
+        provided_value: str,
+        known_values: Iterable[str],
+    ) -> Sequence[str]:
+        return ()
+
+else:
+
+    CAN_DETECT_TYPOS = True
+
+    def detect_possible_typo(
+        provided_value: str,
+        known_values: Iterable[str],
+    ) -> Sequence[str]:
+        k_len = len(provided_value)
+        candidates = []
+        for known_value in known_values:
+            if abs(k_len - len(known_value)) > 2:
+                continue
+            d = distance(provided_value, known_value)
+            if d > 2:
+                continue
+            candidates.append(known_value)
+        return candidates
+
 
 if TYPE_CHECKING:
     from debputy.packages import BinaryPackage
@@ -66,12 +99,19 @@ POSTINST_DEFAULT_CONDITION = (
 
 
 _SPACE_RE = re.compile(r"\s")
+_WORD_EQUAL = re.compile(r"^-*[\w_\-]+=")
 _DOUBLE_ESCAPEES = re.compile(r'([\n`$"\\])')
-_REGULAR_ESCAPEES = re.compile(r'([\s!"$()*+#;<>?@\[\]\\`|~])')
+_REGULAR_ESCAPEES = re.compile(r"""([\s!"$()*+#;<>?@'\[\]\\`|~])""")
 _PROFILE_GROUP_SPLIT = re.compile(r">\s+<")
 _DEFAULT_LOGGER: Optional[logging.Logger] = None
-_STDOUT_HANDLER: Optional[logging.StreamHandler] = None
-_STDERR_HANDLER: Optional[logging.StreamHandler] = None
+_STDOUT_HANDLER: Optional[logging.StreamHandler[Any]] = None
+_STDERR_HANDLER: Optional[logging.StreamHandler[Any]] = None
+PRINT_COMMAND = logging.INFO + 3
+PRINT_BUILD_SYSTEM_COMMAND = PRINT_COMMAND + 3
+
+# Map them back to `INFO`. The names must be unique so the prefix is stripped.
+logging.addLevelName(PRINT_COMMAND, "__INFO")
+logging.addLevelName(PRINT_BUILD_SYSTEM_COMMAND, "_INFO")
 
 
 def assume_not_none(x: Optional[T]) -> T:
@@ -82,11 +122,32 @@ def assume_not_none(x: Optional[T]) -> T:
     return x
 
 
+def _non_verbose_info(msg: str) -> None:
+    global _DEFAULT_LOGGER
+    logger = _DEFAULT_LOGGER
+    if logger is not None:
+        logger.log(PRINT_BUILD_SYSTEM_COMMAND, msg)
+
+
 def _info(msg: str) -> None:
     global _DEFAULT_LOGGER
     logger = _DEFAULT_LOGGER
     if logger:
         logger.info(msg)
+    # No fallback print for info
+
+
+def _is_debug_log_enabled() -> bool:
+    global _DEFAULT_LOGGER
+    logger = _DEFAULT_LOGGER
+    return logger is not None and logger.isEnabledFor(logging.DEBUG)
+
+
+def _debug_log(msg: str) -> None:
+    global _DEFAULT_LOGGER
+    logger = _DEFAULT_LOGGER
+    if logger:
+        logger.debug(msg)
     # No fallback print for info
 
 
@@ -182,7 +243,13 @@ def _backslash_escape(m: re.Match[str]) -> str:
 
 
 def _escape_shell_word(w: str) -> str:
-    if _SPACE_RE.match(w):
+    if _SPACE_RE.search(w):
+        if "=" in w and (m := _WORD_EQUAL.search(w)) is not None:
+            s = m.span(0)
+            assert s[0] == 0
+            prefix = w[0 : s[1]]
+            escaped_value = _DOUBLE_ESCAPEES.sub(_backslash_escape, w[s[1] :])
+            return f'{prefix}"{escaped_value}"'
         w = _DOUBLE_ESCAPEES.sub(_backslash_escape, w)
         return f'"{w}"'
     return _REGULAR_ESCAPEES.sub(_backslash_escape, w)
@@ -192,8 +259,88 @@ def escape_shell(*args: str) -> str:
     return " ".join(_escape_shell_word(w) for w in args)
 
 
-def print_command(*args: str) -> None:
-    print(f"   {escape_shell(*args)}")
+def render_command(
+    *args: str,
+    cwd: Optional[str] = None,
+    env_mod: Optional[EnvironmentModification] = None,
+) -> str:
+    env_mod_prefix = ""
+    if env_mod:
+        env_mod_parts = []
+        if bool(env_mod.removals):
+            env_mod_parts.append("env")
+            if cwd is not None:
+                env_mod_parts.append(f"--chdir={escape_shell(cwd)}")
+            env_mod_parts.extend(f"--unset={escape_shell(v)}" for v in env_mod.removals)
+        env_mod_parts.extend(
+            f"{escape_shell(k)}={escape_shell(v)}" for k, v in env_mod.replacements
+        )
+
+    chdir_prefix = ""
+    if cwd is not None and cwd != ".":
+        chdir_prefix = f"cd {escape_shell(cwd)} && "
+    return f"{chdir_prefix}{env_mod_prefix}{escape_shell(*args)}"
+
+
+def print_command(
+    *args: str,
+    cwd: Optional[str] = None,
+    env_mod: Optional[EnvironmentModification] = None,
+    print_at_log_level: int = PRINT_COMMAND,
+) -> None:
+    if _DEFAULT_LOGGER is None or not _DEFAULT_LOGGER.isEnabledFor(print_at_log_level):
+        return
+
+    rendered_cmd = render_command(
+        *args,
+        cwd=cwd,
+        env_mod=env_mod,
+    )
+    print(f"   {rendered_cmd}")
+
+
+def run_command(
+    *args: str,
+    cwd: Optional[str] = None,
+    env: Optional[Mapping[str, str]] = None,
+    env_mod: Optional[EnvironmentModification] = None,
+    print_at_log_level: int = PRINT_COMMAND,
+) -> None:
+    print_command(
+        *args,
+        cwd=cwd,
+        env_mod=env_mod,
+        print_at_log_level=print_at_log_level,
+    )
+    if env_mod:
+        if env is None:
+            env = os.environ
+        env = env_mod.compute_env(env)
+        if env is os.environ:
+            env = None
+    try:
+        subprocess.check_call(args, cwd=cwd, env=env)
+    # At least "clean_logic.py" relies on catching FileNotFoundError
+    except KeyboardInterrupt:
+        _error(f"Interrupted (SIGINT) while running {escape_shell(*args)}")
+    except subprocess.CalledProcessError as e:
+        _error(f"The command {escape_shell(*args)} failed with status: {e.returncode}")
+
+
+def run_build_system_command(
+    *args: str,
+    cwd: Optional[str] = None,
+    env: Optional[Mapping[str, str]] = None,
+    env_mod: Optional[EnvironmentModification] = None,
+    print_at_log_level: int = PRINT_BUILD_SYSTEM_COMMAND,
+) -> None:
+    run_command(
+        *args,
+        cwd=cwd,
+        env=env,
+        env_mod=env_mod,
+        print_at_log_level=print_at_log_level,
+    )
 
 
 def debian_policy_normalize_symlink_target(
@@ -363,7 +510,7 @@ def integrated_with_debhelper() -> None:
     _DH_INTEGRATION_MODE = True
 
 
-def scratch_dir() -> str:
+def scratch_dir(*, create_if_not_exists: bool = True) -> str:
     global _SCRATCH_DIR
     if _SCRATCH_DIR is not None:
         return _SCRATCH_DIR
@@ -376,9 +523,10 @@ def scratch_dir() -> str:
         is_debputy_dir = False
     else:
         _SCRATCH_DIR = debputy_scratch_dir
-    ensure_dir(_SCRATCH_DIR)
-    if is_debputy_dir:
-        Path("debian/.debputy/.gitignore").write_text("*\n")
+    if create_if_not_exists:
+        ensure_dir(_SCRATCH_DIR)
+        if is_debputy_dir:
+            Path("debian/.debputy/.gitignore").write_text("*\n")
     return _SCRATCH_DIR
 
 
@@ -420,9 +568,11 @@ def generated_content_dir(
     return directory
 
 
-PerlIncDir = collections.namedtuple("PerlIncDir", ["vendorlib", "vendorarch"])
+PerlConfigVars = collections.namedtuple(
+    "PerlIncDir", ["vendorlib", "vendorarch", "cross_inc_dir", "ld", "path_sep"]
+)
 PerlConfigData = collections.namedtuple("PerlConfigData", ["version", "debian_abi"])
-_PERL_MODULE_DIRS: Dict[str, PerlIncDir] = {}
+_PERL_MODULE_DIRS: Dict[str, PerlConfigVars] = {}
 
 
 @functools.lru_cache(1)
@@ -455,42 +605,56 @@ def perlxs_api_dependency() -> str:
     return f"perlapi-{config.version}"
 
 
-def perl_module_dirs(
+def resolve_perl_config(
     dpkg_architecture_variables: DpkgArchitectureBuildProcessValuesTable,
-    dctrl_bin: "BinaryPackage",
-) -> PerlIncDir:
+    dctrl_bin: Optional["BinaryPackage"],
+) -> PerlConfigVars:
     global _PERL_MODULE_DIRS
-    arch = (
-        dctrl_bin.resolved_architecture
-        if dpkg_architecture_variables.is_cross_compiling
-        else "_default_"
-    )
-    module_dir = _PERL_MODULE_DIRS.get(arch)
-    if module_dir is None:
+    if dpkg_architecture_variables.is_cross_compiling:
+        arch = (
+            dctrl_bin.resolved_architecture
+            if dctrl_bin is not None
+            else dpkg_architecture_variables.current_host_arch
+        )
+    else:
+        arch = "_build_arch_"
+    config_vars = _PERL_MODULE_DIRS.get(arch)
+    if config_vars is None:
         cmd = ["perl"]
         if dpkg_architecture_variables.is_cross_compiling:
             version = _perl_version()
-            inc_dir = f"/usr/lib/{dctrl_bin.deb_multiarch}/perl/cross-config-{version}"
+            cross_inc_dir = (
+                f"/usr/lib/{dctrl_bin.deb_multiarch}/perl/cross-config-{version}"
+            )
             # FIXME: This should not fallback to "build-arch" but on the other hand, we use the perl module dirs
             #  for every package at the moment. So mandating correct perl dirs implies mandating perl-xs-dev in
             #  cross builds... meh.
-            if os.path.exists(os.path.join(inc_dir, "Config.pm")):
-                cmd.append(f"-I{inc_dir}")
+            if os.path.exists(os.path.join(cross_inc_dir, "Config.pm")):
+                cmd.append(f"-I{cross_inc_dir}")
+        else:
+            cross_inc_dir = None
         cmd.extend(
-            ["-MConfig", "-e", 'print "$Config{vendorlib}\n$Config{vendorarch}\n"']
+            [
+                "-MConfig",
+                "-e",
+                'print "$Config{vendorlib}\n$Config{vendorarch}\n$Config{ld}\n$Config{path_sep}\n"',
+            ]
         )
         output = subprocess.check_output(cmd).decode("utf-8").splitlines(keepends=False)
-        if len(output) != 2:
+        if len(output) != 4:
             raise ValueError(
                 "Internal error: Unable to determine the perl include directories:"
                 f" Raw output from perl snippet: {output}"
             )
-        module_dir = PerlIncDir(
-            vendorlib=_normalize_path(output[0]),
-            vendorarch=_normalize_path(output[1]),
+        config_vars = PerlConfigVars(
+            vendorlib="/" + _normalize_path(output[0], with_prefix=False),
+            vendorarch="/" + _normalize_path(output[1], with_prefix=False),
+            cross_inc_dir=cross_inc_dir,
+            ld=output[2],
+            path_sep=output[3],
         )
-        _PERL_MODULE_DIRS[arch] = module_dir
-    return module_dir
+        _PERL_MODULE_DIRS[arch] = config_vars
+    return config_vars
 
 
 @functools.lru_cache(1)
@@ -694,8 +858,24 @@ def package_cross_check_precheck(
     return a_may_see_b, b_may_see_a
 
 
+def change_log_level(
+    log_level: int,
+) -> None:
+    if _DEFAULT_LOGGER is not None:
+        _DEFAULT_LOGGER.setLevel(log_level)
+    logging.getLogger("").setLevel(log_level)
+
+
+def current_log_level() -> Optional[int]:
+    if _DEFAULT_LOGGER is not None:
+        return _DEFAULT_LOGGER.level
+    return None
+
+
 def setup_logging(
-    *, log_only_to_stderr: bool = False, reconfigure_logging: bool = False
+    *,
+    log_only_to_stderr: bool = False,
+    reconfigure_logging: bool = False,
 ) -> None:
     global _LOGGING_SET_UP, _DEFAULT_LOGGER, _STDOUT_HANDLER, _STDERR_HANDLER
     if _LOGGING_SET_UP and not reconfigure_logging:
@@ -704,13 +884,20 @@ def setup_logging(
             " Use reconfigure_logging=True if you need to reconfigure it"
         )
     stdout_color, stderr_color, bad_request = _check_color()
+    colors: Optional[Dict[str, str]] = None
 
     if stdout_color or stderr_color:
         try:
             import colorlog
+
         except ImportError:
             stdout_color = False
             stderr_color = False
+        else:
+            colors = dict(colorlog.default_log_colors)
+            # Add our custom levels.
+            colors["_INFO"] = colors["INFO"]
+            colors["__INFO"] = colors["INFO"]
 
     if log_only_to_stderr:
         stdout = sys.stderr
@@ -741,7 +928,12 @@ def setup_logging(
     if stdout_color:
         stdout_handler = colorlog.StreamHandler(stdout)
         stdout_handler.setFormatter(
-            colorlog.ColoredFormatter(color_format, style="{", force_color=True)
+            colorlog.ColoredFormatter(
+                color_format,
+                style="{",
+                force_color=True,
+                log_colors=colors,
+            )
         )
         logger = colorlog.getLogger()
         if existing_stdout_handler is not None:
@@ -760,10 +952,15 @@ def setup_logging(
     if stderr_color:
         stderr_handler = colorlog.StreamHandler(sys.stderr)
         stderr_handler.setFormatter(
-            colorlog.ColoredFormatter(color_format, style="{", force_color=True)
+            colorlog.ColoredFormatter(
+                color_format,
+                style="{",
+                force_color=True,
+                log_colors=colors,
+            )
         )
         logger = logging.getLogger()
-        if existing_stdout_handler is not None:
+        if existing_stderr_handler is not None:
             logger.removeHandler(existing_stderr_handler)
         _STDERR_HANDLER = stderr_handler
         logger.addHandler(stderr_handler)
@@ -771,7 +968,7 @@ def setup_logging(
         stderr_handler = logging.StreamHandler(sys.stderr)
         stderr_handler.setFormatter(logging.Formatter(colorless_format, style="{"))
         logger = logging.getLogger()
-        if existing_stdout_handler is not None:
+        if existing_stderr_handler is not None:
             logger.removeHandler(existing_stderr_handler)
         _STDERR_HANDLER = stderr_handler
         logger.addHandler(stderr_handler)
@@ -787,12 +984,13 @@ def setup_logging(
         *args: Any, **kwargs: Any
     ) -> logging.LogRecord:  # pragma: no cover
         record = old_factory(*args, **kwargs)
+        record.levelname = record.levelname.lstrip("_")
         record.levelnamelower = record.levelname.lower()
         return record
 
     logging.setLogRecordFactory(record_factory)
 
-    logging.getLogger().setLevel(logging.INFO)
+    logging.getLogger().setLevel(logging.WARN)
     _DEFAULT_LOGGER = logging.getLogger(name)
 
     if bad_request:

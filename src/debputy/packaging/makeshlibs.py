@@ -200,12 +200,19 @@ def generate_shlib_dirs(
 ) -> None:
     dir_scanned: Dict[str, Dict[str, Set[str]]] = {}
     dirs: Dict[str, str] = {}
+    warn_dirs = {
+        "/usr/lib",
+        "/lib",
+        f"/usr/lib/{pkg.deb_multiarch}",
+        f"/lib/{pkg.deb_multiarch}",
+    }
 
     for soname_info in soname_info_list:
         elf_binary = soname_info.path
         p = assume_not_none(elf_binary.parent_dir)
-        matches = dir_scanned.get(p.absolute)
-        materialized_dir = dirs.get(p.absolute)
+        abs_parent_path = p.absolute
+        matches = dir_scanned.get(abs_parent_path)
+        materialized_dir = dirs.get(abs_parent_path)
         if matches is None:
             matches = collections.defaultdict(set)
             for child in p.iterdir:
@@ -216,17 +223,18 @@ def generate_shlib_dirs(
                     # The shlib symlinks (we are interested in) are relative to the same folder
                     continue
                 matches[target].add(child.name)
-            dir_scanned[p.absolute] = matches
+            dir_scanned[abs_parent_path] = matches
         symlinks = matches.get(elf_binary.name)
         if not symlinks:
-            _warn(
-                f"Could not find any SO symlinks pointing to {elf_binary.absolute} in {pkg.name} !?"
-            )
+            if abs_parent_path in warn_dirs:
+                _warn(
+                    f"Could not find any SO symlinks pointing to {elf_binary.absolute} in {pkg.name} !?"
+                )
             continue
         if materialized_dir is None:
             materialized_dir = tempfile.mkdtemp(prefix=f"{pkg.name}_", dir=root_dir)
             materialized_dirs.append(materialized_dir)
-            dirs[p.absolute] = materialized_dir
+            dirs[abs_parent_path] = materialized_dir
 
         os.symlink(elf_binary.fs_path, os.path.join(materialized_dir, elf_binary.name))
         for link in symlinks:

@@ -3,6 +3,7 @@ import re
 from typing import Sequence, Optional, FrozenSet, Tuple, List, cast
 
 from debputy.architecture_support import DpkgArchitectureBuildProcessValuesTable
+from debputy.commands.debputy_cmd.output import OutputStylingBase
 from debputy.highlevel_manifest import MutableYAMLManifest
 from debputy.substitution import Substitution
 
@@ -38,6 +39,7 @@ class ConflictingChange(RuntimeError):
 @dataclasses.dataclass(slots=True)
 class FeatureMigration:
     tagline: str
+    fo: OutputStylingBase
     successful_manifest_changes: int = 0
     already_present: int = 0
     warnings: List[str] = dataclasses.field(default_factory=list)

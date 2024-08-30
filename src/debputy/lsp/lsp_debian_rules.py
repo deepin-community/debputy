@@ -1,6 +1,5 @@
 import functools
 import itertools
-import json
 import os
 import re
 import subprocess
@@ -12,9 +11,28 @@ from typing import (
     List,
     Iterator,
     Tuple,
+    FrozenSet,
 )
 
-from lsprotocol.types import (
+from debputy.dh.dh_assistant import (
+    resolve_active_and_inactive_dh_commands,
+    DhListCommands,
+)
+from debputy.linting.lint_util import LintState
+from debputy.lsp.debputy_ls import DebputyLanguageServer
+from debputy.lsp.diagnostics import DiagnosticData
+from debputy.lsp.lsp_features import (
+    lint_diagnostics,
+    lsp_standard_handler,
+    lsp_completer,
+    LanguageDispatch,
+)
+from debputy.lsp.quickfixes import propose_correct_text_quick_fix
+from debputy.lsp.spellchecking import spellcheck_line
+from debputy.lsp.text_util import (
+    LintCapablePositionCodec,
+)
+from debputy.lsprotocol.types import (
     CompletionItem,
     Diagnostic,
     Range,
@@ -25,23 +43,10 @@ from lsprotocol.types import (
     TEXT_DOCUMENT_WILL_SAVE_WAIT_UNTIL,
     TEXT_DOCUMENT_CODE_ACTION,
 )
-
-from debputy.debhelper_emulation import parse_drules_for_addons
-from debputy.linting.lint_util import LintState
-from debputy.lsp.lsp_features import (
-    lint_diagnostics,
-    lsp_standard_handler,
-    lsp_completer,
-)
-from debputy.lsp.quickfixes import propose_correct_text_quick_fix
-from debputy.lsp.spellchecking import spellcheck_line
-from debputy.lsp.text_util import (
-    LintCapablePositionCodec,
-)
-from debputy.util import _warn
+from debputy.util import detect_possible_typo
 
 try:
-    from debian._deb822_repro.locatable import (
+    from debputy.lsp.vendoring._deb822_repro.locatable import (
         Position as TEPosition,
         Range as TERange,
         START_POSITION,
@@ -51,34 +56,6 @@ try:
     from pygls.workspace import TextDocument
 except ImportError:
     pass
-
-
-try:
-    from Levenshtein import distance
-except ImportError:
-
-    def _detect_possible_typo(
-        provided_value: str,
-        known_values: Iterable[str],
-    ) -> Sequence[str]:
-        return tuple()
-
-else:
-
-    def _detect_possible_typo(
-        provided_value: str,
-        known_values: Iterable[str],
-    ) -> Sequence[str]:
-        k_len = len(provided_value)
-        candidates = []
-        for known_value in known_values:
-            if abs(k_len - len(known_value)) > 2:
-                continue
-            d = distance(provided_value, known_value)
-            if d > 2:
-                continue
-            candidates.append(known_value)
-        return candidates
 
 
 _CONTAINS_TAB_OR_COLON = re.compile(r"[\t:]")
@@ -109,13 +86,15 @@ _COMMAND_WORDS = frozenset(
 )
 
 _LANGUAGE_IDS = [
-    "debian/rules",
+    LanguageDispatch.from_language_id("debian/rules"),
     # LSP's official language ID for Makefile
-    "makefile",
+    LanguageDispatch.from_language_id("makefile", filename_selector="debian/rules"),
     # emacs's name (there is no debian-rules mode)
-    "makefile-gmake",
+    LanguageDispatch.from_language_id(
+        "makefile-gmake", filename_selector="debian/rules"
+    ),
     # vim's name (there is no debrules)
-    "make",
+    LanguageDispatch.from_language_id("make", filename_selector="debian/rules"),
 ]
 
 
@@ -131,16 +110,8 @@ lsp_standard_handler(_LANGUAGE_IDS, TEXT_DOCUMENT_CODE_ACTION)
 lsp_standard_handler(_LANGUAGE_IDS, TEXT_DOCUMENT_WILL_SAVE_WAIT_UNTIL)
 
 
-def is_valid_file(path: str) -> bool:
-    # For debian/rules, the language ID is often set to makefile meaning we get random "non-debian/rules"
-    # makefiles here. Skip those.
-    return path.endswith("debian/rules")
-
-
 @lint_diagnostics(_LANGUAGE_IDS)
 def _lint_debian_rules(lint_state: LintState) -> Optional[List[Diagnostic]]:
-    if not is_valid_file(lint_state.path):
-        return None
     return _lint_debian_rules_impl(lint_state)
 
 
@@ -229,6 +200,16 @@ def iter_make_lines(
         yield line_no, line
 
 
+def _forbidden_hook_targets(dh_commands: DhListCommands) -> FrozenSet[str]:
+    if not dh_commands.disabled_commands:
+        return frozenset()
+    return frozenset(
+        itertools.chain.from_iterable(
+            _as_hook_targets(c) for c in dh_commands.disabled_commands
+        )
+    )
+
+
 def _lint_debian_rules_impl(
     lint_state: LintState,
 ) -> Optional[List[Diagnostic]]:
@@ -238,15 +219,21 @@ def _lint_debian_rules_impl(
     source_root = os.path.dirname(os.path.dirname(path))
     if source_root == "":
         source_root = "."
-    diagnostics = []
+    diagnostics: List[Diagnostic] = []
 
     make_error = _run_make_dryrun(source_root, lines)
     if make_error is not None:
         diagnostics.append(make_error)
-
-    all_dh_commands = _all_dh_commands(source_root, lines)
-    if all_dh_commands:
-        all_hook_targets = {ht for c in all_dh_commands for ht in _as_hook_targets(c)}
+    dh_sequencer_data = lint_state.dh_sequencer_data
+    dh_sequences = dh_sequencer_data.sequences
+    dh_commands = resolve_active_and_inactive_dh_commands(
+        dh_sequences,
+        source_root=source_root,
+    )
+    if dh_commands.active_commands:
+        all_hook_targets = {
+            ht for c in dh_commands.active_commands for ht in _as_hook_targets(c)
+        }
         all_hook_targets.update(_KNOWN_TARGETS)
         source = "debputy (dh_assistant)"
     else:
@@ -254,6 +241,8 @@ def _lint_debian_rules_impl(
         source = "debputy"
 
     missing_targets = {}
+    forbidden_hook_targets = _forbidden_hook_targets(dh_commands)
+    all_allowed_hook_targets = all_hook_targets - forbidden_hook_targets
 
     for line_no, line in iter_make_lines(lines, position_codec, diagnostics):
         try:
@@ -271,14 +260,37 @@ def _lint_debian_rules_impl(
                 break
             if "%" in target or "$" in target:
                 continue
-            if target in all_hook_targets or target in missing_targets:
+            if target in forbidden_hook_targets:
+                pos, endpos = m.span(1)
+                r_server_units = Range(
+                    Position(
+                        line_no,
+                        pos,
+                    ),
+                    Position(
+                        line_no,
+                        endpos,
+                    ),
+                )
+                r = position_codec.range_to_client_units(lines, r_server_units)
+                diagnostics.append(
+                    Diagnostic(
+                        r,
+                        f"The hook target {target} will not be run due to the choice of sequences.",
+                        severity=DiagnosticSeverity.Error,
+                        source=source,
+                    )
+                )
+                continue
+
+            if target in all_allowed_hook_targets or target in missing_targets:
                 continue
             pos, endpos = m.span(1)
             hook_location = line_no, pos, endpos
             missing_targets[target] = hook_location
 
     for target, (line_no, pos, endpos) in missing_targets.items():
-        candidates = _detect_possible_typo(target, all_hook_targets)
+        candidates = detect_possible_typo(target, all_allowed_hook_targets)
         if not candidates and not target.startswith(
             ("override_", "execute_before_", "execute_after_")
         ):
@@ -308,54 +320,19 @@ def _lint_debian_rules_impl(
                 r,
                 msg,
                 severity=DiagnosticSeverity.Warning,
-                data=fixes,
+                data=DiagnosticData(quickfixes=fixes),
                 source=source,
             )
         )
     return diagnostics
 
 
-def _all_dh_commands(source_root: str, lines: List[str]) -> Optional[Sequence[str]]:
-    drules_sequences = set()
-    parse_drules_for_addons(lines, drules_sequences)
-    cmd = ["dh_assistant", "list-commands", "--output-format=json"]
-    if drules_sequences:
-        cmd.append(f"--with={','.join(drules_sequences)}")
-    try:
-        output = subprocess.check_output(
-            cmd,
-            stderr=subprocess.DEVNULL,
-            cwd=source_root,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError) as e:
-        _warn(f"dh_assistant failed (dir: {source_root}): {str(e)}")
-        return None
-    data = json.loads(output)
-    commands_raw = data.get("commands") if isinstance(data, dict) else None
-    if not isinstance(commands_raw, list):
-        return None
-
-    commands = []
-
-    for command in commands_raw:
-        if not isinstance(command, dict):
-            return None
-        command_name = command.get("command")
-        if not command_name:
-            return None
-        commands.append(command_name)
-
-    return commands
-
-
 @lsp_completer(_LANGUAGE_IDS)
 def _debian_rules_completions(
-    ls: "LanguageServer",
+    ls: "DebputyLanguageServer",
     params: CompletionParams,
 ) -> Optional[Union[CompletionList, Sequence[CompletionItem]]]:
     doc = ls.workspace.get_text_document(params.text_document.uri)
-    if not is_valid_file(doc.path):
-        return None
     lines = doc.lines
     server_position = doc.position_codec.position_from_client_units(
         lines, params.position
@@ -368,7 +345,18 @@ def _debian_rules_completions(
         return None
 
     source_root = os.path.dirname(os.path.dirname(doc.path))
-    all_commands = _all_dh_commands(source_root, lines)
-    items = [CompletionItem(ht) for c in all_commands for ht in _as_hook_targets(c)]
+    dh_sequencer_data = ls.lint_state(doc).dh_sequencer_data
+    dh_sequences = dh_sequencer_data.sequences
+    dh_commands = resolve_active_and_inactive_dh_commands(
+        dh_sequences,
+        source_root=source_root,
+    )
+    if not dh_commands.active_commands:
+        return None
+    items = [
+        CompletionItem(ht)
+        for c in dh_commands.active_commands
+        for ht in _as_hook_targets(c)
+    ]
 
     return items

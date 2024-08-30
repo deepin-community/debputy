@@ -6,7 +6,7 @@ from typing import Optional, Sequence, List, Tuple
 from debputy import DEBPUTY_ROOT_DIR
 from debputy.commands.debputy_cmd.context import CommandContext
 from debputy.deb_packaging_support import setup_control_files
-from debputy.debhelper_emulation import dhe_dbgsym_root_dir
+from debputy.dh.debhelper_emulation import dhe_dbgsym_root_dir
 from debputy.filesystem_scan import FSRootDir
 from debputy.highlevel_manifest import HighLevelManifest
 from debputy.intermediate_manifest import IntermediateManifest
@@ -17,13 +17,13 @@ from debputy.util import (
     compute_output_filename,
     scratch_dir,
     ensure_dir,
-    _warn,
     assume_not_none,
+    _info,
 )
 
 
 _RRR_DEB_ASSEMBLY_KEYWORD = "debputy/deb-assembly"
-_WARNED_ABOUT_FALLBACK_ASSEMBLY = False
+_NOTIFIED_ABOUT_FALLBACK_ASSEMBLY = False
 
 
 def _serialize_intermediate_manifest(members: IntermediateManifest) -> str:
@@ -51,13 +51,13 @@ def determine_assembly_method(
             )
         return True, False, gain_root_cmd.split()
     if rrr == "no":
-        global _WARNED_ABOUT_FALLBACK_ASSEMBLY
-        if not _WARNED_ABOUT_FALLBACK_ASSEMBLY:
-            _warn(
+        global _NOTIFIED_ABOUT_FALLBACK_ASSEMBLY
+        if not _NOTIFIED_ABOUT_FALLBACK_ASSEMBLY:
+            _info(
                 'Using internal assembly method due to "Rules-Requires-Root" being "no" and dpkg-deb assembly would'
                 " require (fake)root for binary packages that needs it."
             )
-            _WARNED_ABOUT_FALLBACK_ASSEMBLY = True
+            _NOTIFIED_ABOUT_FALLBACK_ASSEMBLY = True
         return True, True, []
 
     _error(
@@ -77,6 +77,8 @@ def assemble_debs(
     manifest: HighLevelManifest,
     package_data_table: PackageDataTable,
     is_dh_rrr_only_mode: bool,
+    *,
+    debug_materialization: bool = False,
 ) -> None:
     parsed_args = context.parsed_args
     output_path = parsed_args.output
@@ -93,8 +95,8 @@ def assemble_debs(
         package_metadata_context = dctrl_data.package_metadata_context
         if (
             dbgsym_package_name in package_data_table
-            or "noautodbgsym" in manifest.build_env.deb_build_options
-            or "noddebs" in manifest.build_env.deb_build_options
+            or "noautodbgsym" in manifest.deb_options_and_profiles.deb_build_options
+            or "noddebs" in manifest.deb_options_and_profiles.deb_build_options
         ):
             # Discard the dbgsym part if it conflicts with a real package, or
             # we were asked not to build it.
@@ -145,6 +147,7 @@ def assemble_debs(
                 is_udeb=dctrl_bin.is_udeb,  # Review this if we ever do dbgsyms for udebs
                 use_fallback_assembly=False,
                 needs_root=False,
+                debug_materialization=debug_materialization,
             )
 
         _assemble_deb(
@@ -159,6 +162,7 @@ def assemble_debs(
             use_fallback_assembly=use_fallback_assembly,
             needs_root=needs_root,
             gain_root_cmd=gain_root_cmd,
+            debug_materialization=debug_materialization,
         )
 
 
@@ -174,6 +178,8 @@ def _assemble_deb(
     use_fallback_assembly: bool = False,
     needs_root: bool = False,
     gain_root_cmd: Optional[Sequence[str]] = None,
+    *,
+    debug_materialization: bool = False,
 ) -> None:
     scratch_root_dir = scratch_dir()
     materialization_dir = os.path.join(
@@ -189,9 +195,11 @@ def _assemble_deb(
         # conditions than the package needing root. (R³: binary-targets implies `needs_root=True`
         # without a gain_root_cmd)
         materialize_cmd.extend(gain_root_cmd)
+    materialize_cmd.append(deb_materialize_cmd)
+    if debug_materialization:
+        materialize_cmd.append("--verbose")
     materialize_cmd.extend(
         [
-            deb_materialize_cmd,
             "materialize-deb",
             "--intermediate-package-manifest",
             "-",
@@ -223,11 +231,11 @@ def _assemble_deb(
         materialize_cmd.extend(upstream_args)
 
     if combined_materialization_and_assembly:
-        print(
+        _info(
             f"Materializing and assembling {package} via: {escape_shell(*materialize_cmd)}"
         )
     else:
-        print(f"Materializing {package} via: {escape_shell(*materialize_cmd)}")
+        _info(f"Materializing {package} via: {escape_shell(*materialize_cmd)}")
     proc = subprocess.Popen(materialize_cmd, stdin=subprocess.PIPE)
     proc.communicate(
         _serialize_intermediate_manifest(intermediate_manifest).encode("utf-8")
@@ -244,7 +252,7 @@ def _assemble_deb(
             "--output",
             output,
         ]
-        print(f"Assembling {package} via: {escape_shell(*build_materialization)}")
+        _info(f"Assembling {package} via: {escape_shell(*build_materialization)}")
         try:
             subprocess.check_call(build_materialization)
         except subprocess.CalledProcessError as e:

@@ -3,6 +3,7 @@ import argparse
 import collections
 import contextlib
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -28,6 +29,7 @@ from debputy.util import (
     detect_fakeroot,
     print_command,
     program_name,
+    escape_shell,
 )
 from debputy.version import __version__
 
@@ -50,6 +52,13 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--version", action="version", version=__version__)
+    parser.add_argument(
+        "--verbose",
+        default=False,
+        action="store_true",
+        dest="verbose",
+        help="Make command verbose",
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -177,13 +186,20 @@ def parse_args() -> argparse.Namespace:
         upstream_args = []
     parsed_args = parser.parse_args(argv[1:])
     setattr(parsed_args, "upstream_args", upstream_args)
+    if parsed_args.verbose:
+        logging.getLogger().setLevel(logging.INFO)
 
     return parsed_args
 
 
 def _run(cmd: List[str]) -> None:
     print_command(*cmd)
-    subprocess.check_call(cmd)
+    try:
+        subprocess.check_call(cmd)
+    except FileNotFoundError:
+        _error(f"   {escape_shell(*cmd)} failed! Command was not available in PATH")
+    except subprocess.CalledProcessError:
+        _error(f"   {escape_shell(*cmd)} had a non-zero exit code.")
 
 
 def strip_path_prefix(member_path: str) -> str:

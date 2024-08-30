@@ -10,6 +10,10 @@ class DebputyRuntimeError(RuntimeError):
         return cast("str", self.args[0])
 
 
+class DebputyBuildStepError(DebputyRuntimeError):
+    pass
+
+
 class DebputySubstitutionError(DebputyRuntimeError):
     pass
 
@@ -61,6 +65,10 @@ class PluginNotFoundError(PluginBaseError):
 
 
 class PluginInitializationError(PluginBaseError):
+    pass
+
+
+class PluginIncorrectRegistrationError(PluginInitializationError):
     pass
 
 

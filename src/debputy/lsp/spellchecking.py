@@ -6,8 +6,9 @@ import subprocess
 from typing import Iterable, FrozenSet, Tuple, Optional, List
 
 from debian.debian_support import Release
-from lsprotocol.types import Diagnostic, Range, Position, DiagnosticSeverity
+from debputy.lsprotocol.types import Diagnostic, Range, Position, DiagnosticSeverity
 
+from debputy.lsp.diagnostics import DiagnosticData
 from debputy.lsp.quickfixes import propose_correct_text_quick_fix
 from debputy.lsp.text_util import LintCapablePositionCodec
 from debputy.util import _info, _warn
@@ -158,7 +159,10 @@ def spellcheck_line(
             f'Spelling "{word}"',
             severity=DiagnosticSeverity.Hint,
             source="debputy",
-            data=[propose_correct_text_quick_fix(c) for c in corrections],
+            data=DiagnosticData(
+                lint_severity="spelling",
+                quickfixes=[propose_correct_text_quick_fix(c) for c in corrections],
+            ),
         )
 
 
