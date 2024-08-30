@@ -4,36 +4,39 @@ from email.utils import parsedate_to_datetime
 from typing import (
     Union,
     List,
-    Dict,
     Iterator,
     Optional,
     Iterable,
 )
 
-from lsprotocol.types import (
+from debputy.lsprotocol.types import (
     Diagnostic,
     DidOpenTextDocumentParams,
     DidChangeTextDocumentParams,
     TEXT_DOCUMENT_WILL_SAVE_WAIT_UNTIL,
     TEXT_DOCUMENT_CODE_ACTION,
-    DidCloseTextDocumentParams,
     Range,
     Position,
     DiagnosticSeverity,
 )
 
 from debputy.linting.lint_util import LintState
-from debputy.lsp.lsp_features import lsp_diagnostics, lsp_standard_handler
+from debputy.lsp.diagnostics import DiagnosticData
+from debputy.lsp.lsp_features import (
+    lsp_diagnostics,
+    lsp_standard_handler,
+    LanguageDispatch,
+)
 from debputy.lsp.quickfixes import (
     propose_correct_text_quick_fix,
 )
 from debputy.lsp.spellchecking import spellcheck_line
-from debputy.lsp.text_util import (
-    LintCapablePositionCodec,
-)
 
 try:
-    from debian._deb822_repro.locatable import Position as TEPosition, Ranage as TERange
+    from debputy.lsp.vendoring._deb822_repro.locatable import (
+        Position as TEPosition,
+        Range as TERange,
+    )
 
     from pygls.server import LanguageServer
     from pygls.workspace import TextDocument
@@ -46,11 +49,11 @@ except ImportError:
 _MAXIMUM_WIDTH: int = 82
 _HEADER_LINE = re.compile(r"^(\S+)\s*[(]([^)]+)[)]")  # TODO: Add reset
 _LANGUAGE_IDS = [
-    "debian/changelog",
+    LanguageDispatch.from_language_id("debian/changelog"),
     # emacs's name
-    "debian-changelog",
+    LanguageDispatch.from_language_id("debian-changelog"),
     # vim's name
-    "debchangelog",
+    LanguageDispatch.from_language_id("debchangelog"),
 ]
 
 _WEEKDAYS_BY_IDX = [
@@ -63,23 +66,6 @@ _WEEKDAYS_BY_IDX = [
     "Sun",
 ]
 _KNOWN_WEEK_DAYS = frozenset(_WEEKDAYS_BY_IDX)
-
-DOCUMENT_VERSION_TABLE: Dict[str, int] = {}
-
-
-def _handle_close(
-    ls: "LanguageServer",
-    params: DidCloseTextDocumentParams,
-) -> None:
-    try:
-        del DOCUMENT_VERSION_TABLE[params.text_document.uri]
-    except KeyError:
-        pass
-
-
-def is_doc_at_version(uri: str, version: int) -> bool:
-    dv = DOCUMENT_VERSION_TABLE.get(uri)
-    return dv == version
 
 
 lsp_standard_handler(_LANGUAGE_IDS, TEXT_DOCUMENT_CODE_ACTION)
@@ -156,7 +142,7 @@ def _check_footer_line(
     if day_name not in _KNOWN_WEEK_DAYS:
         yield Diagnostic(
             position_codec.range_to_client_units(lines, day_name_range_server_units),
-            "Expected a three letter date here (Mon, Tue, ..., Sun).",
+            "Expected a three letter date here using US English format (Mon, Tue, ..., Sun).",
             severity=DiagnosticSeverity.Error,
             source="debputy",
         )
@@ -212,7 +198,9 @@ def _check_footer_line(
             f"The date was a {expected_week_day}day.",
             severity=DiagnosticSeverity.Warning,
             source="debputy",
-            data=[propose_correct_text_quick_fix(expected_week_day)],
+            data=DiagnosticData(
+                quickfixes=[propose_correct_text_quick_fix(expected_week_day)]
+            ),
         )
 
 
@@ -232,8 +220,9 @@ def _check_header_line(
     if (
         entry_no == 1
         and dctrl_source_pkg is not None
-        and dctrl_source_pkg.name != source_name
+        and dctrl_source_pkg.fields.get("Source") != source_name
     ):
+        expected_name = dctrl_source_pkg.fields.get("Source") or "(missing)"
         start_pos, end_pos = m.span(1)
         range_server_units = Range(
             Position(
@@ -248,7 +237,7 @@ def _check_header_line(
         yield Diagnostic(
             position_codec.range_to_client_units(lint_state.lines, range_server_units),
             f"The first entry must use the same source name as debian/control."
-            f' Changelog uses: "{source_name}" while d/control uses: "{dctrl_source_pkg.name}"',
+            f' Changelog uses: "{source_name}" while d/control uses: "{expected_name}"',
             severity=DiagnosticSeverity.Error,
             source="debputy",
         )
@@ -262,12 +251,13 @@ def _scan_debian_changelog_for_diagnostics(
     *,
     max_line_length: int = _MAXIMUM_WIDTH,
 ) -> Iterator[List[Diagnostic]]:
-    diagnostics = []
+    diagnostics: List[Diagnostic] = []
     diagnostics_at_last_update = 0
     lines_since_last_update = 0
     lines = lint_state.lines
     position_codec = lint_state.position_codec
     entry_no = 0
+    entry_limit = 2
     for line_no, line in enumerate(lines):
         orig_line = line
         line = line.rstrip()
@@ -279,6 +269,10 @@ def _scan_debian_changelog_for_diagnostics(
         if not line.startswith("  "):
             if not line[0].isspace():
                 entry_no += 1
+                # Figure out the right cut which may not be as simple as just the
+                # top two.
+                if entry_no > entry_limit:
+                    break
                 diagnostics.extend(
                     _check_header_line(
                         lint_state,

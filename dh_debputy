@@ -81,7 +81,6 @@ my (@plugins, $integration_mode);
 init(options => {
 	"destdir=s"          => \$dh{DESTDIR},
 	"plugin=s"           => \@plugins,
-	"integration-mode=s" => \$integration_mode,
 });
 
 # Set the default destination directory.
@@ -90,6 +89,11 @@ if (! defined $dh{DESTDIR}) {
 }
 
 my $debputy_cmd = $ENV{'DEBPUTY_CMD'} // 'debputy';
+# `debputy` does not know about any -v/--verbose passed directly.
+# But it does listen to `DH_VERBOSE` in these integration modes, so we just
+# use that for now. At some point, this might be replaced by a proper
+# command line option.
+$ENV{'DH_VERBOSE'} = '1' if $dh{VERBOSE};
 
 my @debputy_cmdline = ($debputy_cmd);
 for my $plugin (@plugins) {
@@ -99,8 +103,6 @@ push(@debputy_cmdline,
 	'internal-command',
 	'dh-integration-generate-debs',
 );
-push(@debputy_cmdline, "--integration-mode=${integration_mode}")
-	if defined($integration_mode);
 for my $package (@{$dh{DOPACKAGES}}) {
 	push(@debputy_cmdline, '-p', $package);
 }

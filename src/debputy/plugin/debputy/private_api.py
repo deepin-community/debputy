@@ -1,7 +1,7 @@
 import ctypes
 import ctypes.util
+import dataclasses
 import functools
-import itertools
 import textwrap
 import time
 from datetime import datetime
@@ -43,9 +43,11 @@ from debputy.manifest_conditions import (
     BuildProfileMatch,
     SourceContextArchMatchManifestCondition,
 )
-from debputy.manifest_parser.base_types import (
+from debputy.manifest_parser.tagging_types import (
     DebputyParsedContent,
-    DebputyParsedContentStandardConditional,
+    TypeMapping,
+)
+from debputy.manifest_parser.base_types import (
     FileSystemMode,
     StaticFileSystemOwner,
     StaticFileSystemGroup,
@@ -53,15 +55,16 @@ from debputy.manifest_parser.base_types import (
     FileSystemExactMatchRule,
     FileSystemMatchRule,
     SymbolicMode,
-    TypeMapping,
     OctalMode,
     FileSystemExactNonDirMatchRule,
+    BuildEnvironmentDefinition,
+    DebputyParsedContentStandardConditional,
 )
-from debputy.manifest_parser.declarative_parser import DebputyParseHint
+from debputy.manifest_parser.parse_hints import DebputyParseHint
 from debputy.manifest_parser.exceptions import ManifestParseException
 from debputy.manifest_parser.mapper_code import type_mapper_str2package
 from debputy.manifest_parser.parser_data import ParserContextData
-from debputy.manifest_parser.util import AttributePath
+from debputy.manifest_parser.util import AttributePath, check_integration_mode
 from debputy.packages import BinaryPackage
 from debputy.path_matcher import ExactFileSystemPath
 from debputy.plugin.api import (
@@ -76,8 +79,12 @@ from debputy.plugin.api.impl_types import automatic_discard_rule_example, PPFFor
 from debputy.plugin.api.spec import (
     type_mapping_reference_documentation,
     type_mapping_example,
+    not_integrations,
+    INTEGRATION_MODE_DH_DEBPUTY_RRR,
 )
+from debputy.plugin.api.std_docs import docs_from
 from debputy.plugin.debputy.binary_package_rules import register_binary_package_rules
+from debputy.plugin.debputy.build_system_rules import register_build_system_rules
 from debputy.plugin.debputy.discard_rules import (
     _debputy_discard_pyc_files,
     _debputy_prune_la_files,
@@ -153,8 +160,25 @@ _DOCUMENTED_DPKG_ARCH_VARS = {
 }
 
 
+_NOT_INTEGRATION_RRR = not_integrations(INTEGRATION_MODE_DH_DEBPUTY_RRR)
+
+
 def _manifest_format_doc(anchor: str) -> str:
     return f"{DEBPUTY_DOC_ROOT_DIR}/MANIFEST-FORMAT.md#{anchor}"
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class Capability:
+    value: str
+
+    @classmethod
+    def parse(
+        cls,
+        raw_value: str,
+        _attribute_path: AttributePath,
+        _parser_context: "ParserContextData",
+    ) -> "Capability":
+        return cls(raw_value)
 
 
 @functools.lru_cache
@@ -312,6 +336,28 @@ def initialize_via_private_api(public_api: DebputyPluginInitializer) -> None:
 
 
 def register_type_mappings(api: DebputyPluginInitializerProvider) -> None:
+    api.register_mapped_type(
+        TypeMapping(Capability, str, Capability.parse),
+        reference_documentation=type_mapping_reference_documentation(
+            description=textwrap.dedent(
+                """\
+                A Linux capability
+
+                The value is a Linux capability parsable by cap_from_text on the host system.
+
+                With `libcap2` installed, `debputy` will attempt to parse the value and provide
+                warnings if the value cannot be parsed by `libcap2`. However, `debputy` will
+                currently never emit hard errors for unknown capabilities.
+            """,
+            ),
+            examples=[
+                type_mapping_example("cap_chown=p"),
+                type_mapping_example("cap_chown=ep"),
+                type_mapping_example("cap_kill-pe"),
+                type_mapping_example("=ep cap_chown-e cap_kill-ep"),
+            ],
+        ),
+    )
     api.register_mapped_type(
         TypeMapping(
             FileSystemMatchRule,
@@ -544,6 +590,16 @@ def register_type_mappings(api: DebputyPluginInitializerProvider) -> None:
                 type_mapping_example("0644"),
                 type_mapping_example("0755"),
             ],
+        ),
+    )
+    api.register_mapped_type(
+        TypeMapping(
+            BuildEnvironmentDefinition,
+            str,
+            lambda v, ap, pc: pc.resolve_build_environment(v, ap),
+        ),
+        reference_documentation=type_mapping_reference_documentation(
+            description="Reference to an build environment defined in `build-environments`",
         ),
     )
 
@@ -856,14 +912,7 @@ def register_install_rules(api: DebputyPluginInitializerProvider) -> None:
                             """
                     ),
                 ),
-                documented_attr(
-                    "when",
-                    textwrap.dedent(
-                        """\
-                    A condition as defined in [Conditional rules]({MANIFEST_FORMAT_DOC}#Conditional rules).
-                """
-                    ),
-                ),
+                *docs_from(DebputyParsedContentStandardConditional),
             ],
             reference_documentation_url=_manifest_format_doc("generic-install-install"),
         ),
@@ -1152,14 +1201,7 @@ def register_install_rules(api: DebputyPluginInitializerProvider) -> None:
                             """
                     ),
                 ),
-                documented_attr(
-                    "when",
-                    textwrap.dedent(
-                        """\
-                    A condition as defined in [Conditional rules]({MANIFEST_FORMAT_DOC}#Conditional rules).
-                """
-                    ),
-                ),
+                *docs_from(DebputyParsedContentStandardConditional),
             ],
             reference_documentation_url=_manifest_format_doc(
                 "install-manpages-install-man"
@@ -1314,14 +1356,7 @@ def register_install_rules(api: DebputyPluginInitializerProvider) -> None:
                             """
                     ),
                 ),
-                documented_attr(
-                    "when",
-                    textwrap.dedent(
-                        """\
-                    A condition as defined in [Conditional rules]({MANIFEST_FORMAT_DOC}#Conditional rules).
-                """
-                    ),
-                ),
+                *docs_from(DebputyParsedContentStandardConditional),
             ],
             reference_documentation_url=_manifest_format_doc("generic-install-install"),
         ),
@@ -1367,14 +1402,7 @@ def register_transformation_rules(api: DebputyPluginInitializerProvider) -> None
             """
                     ),
                 ),
-                documented_attr(
-                    "when",
-                    textwrap.dedent(
-                        """\
-                A condition as defined in [Conditional rules]({MANIFEST_FORMAT_DOC}#Conditional rules).
-            """
-                    ),
-                ),
+                *docs_from(DebputyParsedContentStandardConditional),
             ],
             reference_documentation_url=_manifest_format_doc(
                 "move-transformation-rule-move"
@@ -1523,14 +1551,7 @@ def register_transformation_rules(api: DebputyPluginInitializerProvider) -> None
             """
                     ),
                 ),
-                documented_attr(
-                    "when",
-                    textwrap.dedent(
-                        """\
-                A condition as defined in [Conditional rules]({MANIFEST_FORMAT_DOC}#Conditional rules).
-            """
-                    ),
-                ),
+                *docs_from(DebputyParsedContentStandardConditional),
             ],
             reference_documentation_url=_manifest_format_doc(
                 "create-symlinks-transformation-rule-create-symlink"
@@ -1639,14 +1660,7 @@ def register_transformation_rules(api: DebputyPluginInitializerProvider) -> None
             """
                     ),
                 ),
-                documented_attr(
-                    "when",
-                    textwrap.dedent(
-                        """\
-                A condition as defined in [Conditional rules]({MANIFEST_FORMAT_DOC}#Conditional rules).
-            """
-                    ),
-                ),
+                *docs_from(DebputyParsedContentStandardConditional),
             ],
             reference_documentation_url=_manifest_format_doc(
                 "change-path-ownergroup-or-mode-path-metadata"
@@ -1727,14 +1741,7 @@ def register_transformation_rules(api: DebputyPluginInitializerProvider) -> None
             """
                     ),
                 ),
-                documented_attr(
-                    "when",
-                    textwrap.dedent(
-                        """\
-                A condition as defined in [Conditional rules]({MANIFEST_FORMAT_DOC}#Conditional rules).
-            """
-                    ),
-                ),
+                *docs_from(DebputyParsedContentStandardConditional),
             ],
             reference_documentation_url=_manifest_format_doc(
                 "create-directories-transformation-rule-directories"
@@ -2072,14 +2079,14 @@ class PathManifestSourceDictFormat(_ModeOwnerBase):
     ]
     paths: NotRequired[List[FileSystemMatchRule]]
     recursive: NotRequired[bool]
-    capabilities: NotRequired[str]
+    capabilities: NotRequired[Capability]
     capability_mode: NotRequired[FileSystemMode]
 
 
 class PathManifestRule(_ModeOwnerBase):
     paths: List[FileSystemMatchRule]
     recursive: NotRequired[bool]
-    capabilities: NotRequired[str]
+    capabilities: NotRequired[Capability]
     capability_mode: NotRequired[FileSystemMode]
 
 
@@ -2517,21 +2524,20 @@ def _install_docs_rule_handler(
                 path, package_type="deb", package_attribute="into"
             )
         ]
-    into = frozenset(into)
     if install_as is not None:
         assert len(sources) == 1
         assert dest_dir is None
         return InstallRule.install_doc_as(
             sources[0],
             install_as.match_rule.path,
-            into,
+            frozenset(into),
             path.path,
             condition,
         )
     return InstallRule.install_doc(
         sources,
         dest_dir,
-        into,
+        frozenset(into),
         path.path,
         condition,
     )
@@ -2622,10 +2628,9 @@ def _install_man_rule_handler(
             )
         ]
     condition = parsed_data.get("when")
-    into = frozenset(into)
     return InstallRule.install_man(
         sources,
-        into,
+        frozenset(into),
         section,
         language,
         attribute_path.path,
@@ -2731,7 +2736,7 @@ def _transformation_path_metadata(
     _name: str,
     parsed_data: PathManifestRule,
     attribute_path: AttributePath,
-    _context: ParserContextData,
+    context: ParserContextData,
 ) -> TransformationRule:
     match_rules = parsed_data["paths"]
     owner = parsed_data.get("owner")
@@ -2740,16 +2745,28 @@ def _transformation_path_metadata(
     recursive = parsed_data.get("recursive", False)
     capabilities = parsed_data.get("capabilities")
     capability_mode = parsed_data.get("capability_mode")
+    cap: Optional[str] = None
 
     if capabilities is not None:
+        check_integration_mode(
+            attribute_path["capabilities"],
+            context,
+            _NOT_INTEGRATION_RRR,
+        )
         if capability_mode is None:
             capability_mode = SymbolicMode.parse_filesystem_mode(
                 "a-s",
                 attribute_path["capability-mode"],
             )
+        cap = capabilities.value
         validate_cap = check_cap_checker()
-        validate_cap(capabilities, attribute_path["capabilities"].path)
+        validate_cap(cap, attribute_path["capabilities"].path)
     elif capability_mode is not None and capabilities is None:
+        check_integration_mode(
+            attribute_path["capability_mode"],
+            context,
+            _NOT_INTEGRATION_RRR,
+        )
         raise ManifestParseException(
             "The attribute capability-mode cannot be provided without capabilities"
             f" in {attribute_path.path}"
@@ -2767,7 +2784,7 @@ def _transformation_path_metadata(
         group,
         mode,
         recursive,
-        capabilities,
+        cap,
         capability_mode,
         attribute_path.path,
         condition,

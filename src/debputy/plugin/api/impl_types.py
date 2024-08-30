@@ -1,6 +1,5 @@
 import dataclasses
 import os.path
-import textwrap
 from typing import (
     Optional,
     Callable,
@@ -23,23 +22,23 @@ from typing import (
     Literal,
     Set,
     Iterator,
+    Container,
+    Protocol,
 )
 from weakref import ref
 
-from debputy import DEBPUTY_DOC_ROOT_DIR
 from debputy.exceptions import (
     DebputyFSIsROError,
     PluginAPIViolationError,
     PluginConflictError,
     UnhandledOrUnexpectedErrorFromPluginError,
+    PluginBaseError,
+    PluginInitializationError,
 )
 from debputy.filesystem_scan import as_path_def
-from debputy.installations import InstallRule
-from debputy.maintscript_snippet import DpkgMaintscriptHelperCommand
-from debputy.manifest_conditions import ManifestCondition
-from debputy.manifest_parser.base_types import DebputyParsedContent, TypeMapping
 from debputy.manifest_parser.exceptions import ManifestParseException
-from debputy.manifest_parser.util import AttributePath
+from debputy.manifest_parser.tagging_types import DebputyParsedContent, TypeMapping
+from debputy.manifest_parser.util import AttributePath, check_integration_mode
 from debputy.packages import BinaryPackage
 from debputy.plugin.api import (
     VirtualPath,
@@ -59,16 +58,18 @@ from debputy.plugin.api.spec import (
     reference_documentation,
     PackagerProvidedFileReferenceDocumentation,
     TypeMappingDocumentation,
+    DebputyIntegrationMode,
+)
+from debputy.plugin.plugin_state import (
+    run_in_context_of_plugin,
 )
 from debputy.substitution import VariableContext
-from debputy.transformation_rules import TransformationRule
 from debputy.util import _normalize_path, package_cross_check_precheck
 
 if TYPE_CHECKING:
     from debputy.plugin.api.spec import (
         ServiceDetector,
         ServiceIntegrator,
-        PackageTypeSelector,
     )
     from debputy.manifest_parser.parser_data import ParserContextData
     from debputy.highlevel_manifest import (
@@ -76,10 +77,10 @@ if TYPE_CHECKING:
         PackageTransformationDefinition,
         BinaryPackageData,
     )
-
-
-_PACKAGE_TYPE_DEB_ONLY = frozenset(["deb"])
-_ALL_PACKAGE_TYPES = frozenset(["deb", "udeb"])
+    from debputy.plugin.debputy.to_be_api_types import (
+        BuildSystemRule,
+        BuildRuleParsedFormat,
+    )
 
 
 TD = TypeVar("TD", bound="Union[DebputyParsedContent, List[DebputyParsedContent]]")
@@ -87,24 +88,10 @@ PF = TypeVar("PF")
 SF = TypeVar("SF")
 TP = TypeVar("TP")
 TTP = Type[TP]
+BSR = TypeVar("BSR", bound="BuildSystemRule")
 
 DIPKWHandler = Callable[[str, AttributePath, "ParserContextData"], TP]
 DIPHandler = Callable[[str, PF, AttributePath, "ParserContextData"], TP]
-
-
-def resolve_package_type_selectors(
-    package_type: "PackageTypeSelector",
-) -> FrozenSet[str]:
-    if package_type is _ALL_PACKAGE_TYPES or package_type is _PACKAGE_TYPE_DEB_ONLY:
-        return cast("FrozenSet[str]", package_type)
-    if isinstance(package_type, str):
-        return (
-            _PACKAGE_TYPE_DEB_ONLY
-            if package_type == "deb"
-            else frozenset([package_type])
-        )
-    else:
-        return frozenset(package_type)
 
 
 @dataclasses.dataclass(slots=True)
@@ -115,6 +102,10 @@ class DebputyPluginMetadata:
     plugin_initializer: Optional[Callable[["DebputyPluginInitializer"], None]]
     plugin_path: str
     _is_initialized: bool = False
+
+    @property
+    def is_bundled(self) -> bool:
+        return self.plugin_path == "<bundled>"
 
     @property
     def is_loaded(self) -> bool:
@@ -137,7 +128,17 @@ class DebputyPluginMetadata:
     def load_plugin(self) -> None:
         plugin_loader = self.plugin_loader
         assert plugin_loader is not None
-        self.plugin_initializer = plugin_loader()
+        try:
+            self.plugin_initializer = run_in_context_of_plugin(
+                self.plugin_name,
+                plugin_loader,
+            )
+        except PluginBaseError:
+            raise
+        except Exception as e:
+            raise PluginInitializationError(
+                f"Initialization of {self.plugin_name} failed due to its initializer raising an exception"
+            ) from e
         assert self.plugin_initializer is not None
 
 
@@ -184,6 +185,7 @@ class PackagerProvidedFileClassSpec:
     )
     reference_documentation: Optional[PackagerProvidedFileReferenceDocumentation] = None
     bug_950723: bool = False
+    has_active_command: bool = True
 
     @property
     def supports_priority(self) -> bool:
@@ -263,17 +265,21 @@ class MetadataOrMaintscriptDetector:
                 " this stage (file system layout is committed and the attempted changes"
                 " would be lost)."
             ) from e
-        except (ChildProcessError, RuntimeError, AttributeError) as e:
-            nv = f"{self.plugin_metadata.plugin_name}"
-            raise UnhandledOrUnexpectedErrorFromPluginError(
-                f"The plugin {nv} threw an unhandled or unexpected exception from its metadata"
-                f" detector with id {self.detector_id}."
-            ) from e
+        except UnhandledOrUnexpectedErrorFromPluginError as e:
+            e.add_note(
+                f"The exception was raised by the detector with the ID: {self.detector_id}"
+            )
 
 
 class DeclarativeInputParser(Generic[TD]):
     @property
     def inline_reference_documentation(self) -> Optional[ParserDocumentation]:
+        return None
+
+    @property
+    def expected_debputy_integration_mode(
+        self,
+    ) -> Optional[Container[DebputyIntegrationMode]]:
         return None
 
     @property
@@ -292,16 +298,30 @@ class DeclarativeInputParser(Generic[TD]):
 
 
 class DelegatingDeclarativeInputParser(DeclarativeInputParser[TD]):
-    __slots__ = ("delegate", "_reference_documentation")
+    __slots__ = (
+        "delegate",
+        "_reference_documentation",
+        "_expected_debputy_integration_mode",
+    )
 
     def __init__(
         self,
         delegate: DeclarativeInputParser[TD],
         *,
         inline_reference_documentation: Optional[ParserDocumentation] = None,
+        expected_debputy_integration_mode: Optional[
+            Container[DebputyIntegrationMode]
+        ] = None,
     ) -> None:
         self.delegate = delegate
         self._reference_documentation = inline_reference_documentation
+        self._expected_debputy_integration_mode = expected_debputy_integration_mode
+
+    @property
+    def expected_debputy_integration_mode(
+        self,
+    ) -> Optional[Container[DebputyIntegrationMode]]:
+        return self._expected_debputy_integration_mode
 
     @property
     def inline_reference_documentation(self) -> Optional[ParserDocumentation]:
@@ -329,6 +349,9 @@ class ListWrappedDeclarativeInputParser(DelegatingDeclarativeInputParser[TD]):
         *,
         parser_context: Optional["ParserContextData"] = None,
     ) -> TD:
+        check_integration_mode(
+            path, parser_context, self._expected_debputy_integration_mode
+        )
         if not isinstance(value, list):
             doc_ref = self._doc_url_error_suffix(see_url_version=True)
             raise ManifestParseException(
@@ -420,7 +443,7 @@ class DispatchingParserBase(Generic[TP]):
 
     def _add_parser(
         self,
-        keyword: Union[str, List[str]],
+        keyword: Union[str, Iterable[str]],
         ppp: "PluginProvidedParser[PF, TP]",
     ) -> None:
         ks = [keyword] if isinstance(keyword, str) else keyword
@@ -461,12 +484,22 @@ class DispatchingObjectParser(
         manifest_attribute_path_template: str,
         *,
         parser_documentation: Optional[ParserDocumentation] = None,
+        expected_debputy_integration_mode: Optional[
+            Container[DebputyIntegrationMode]
+        ] = None,
     ) -> None:
         super().__init__(manifest_attribute_path_template)
         self._attribute_documentation: List[ParserAttributeDocumentation] = []
         if parser_documentation is None:
             parser_documentation = reference_documentation()
         self._parser_documentation = parser_documentation
+        self._expected_debputy_integration_mode = expected_debputy_integration_mode
+
+    @property
+    def expected_debputy_integration_mode(
+        self,
+    ) -> Optional[Container[DebputyIntegrationMode]]:
+        return self._expected_debputy_integration_mode
 
     @property
     def reference_documentation_url(self) -> Optional[str]:
@@ -535,6 +568,11 @@ class DispatchingObjectParser(
         *,
         parser_context: "ParserContextData",
     ) -> TP:
+        check_integration_mode(
+            attribute_path,
+            parser_context,
+            self._expected_debputy_integration_mode,
+        )
         doc_ref = ""
         if self.reference_documentation_url is not None:
             doc_ref = (
@@ -542,11 +580,11 @@ class DispatchingObjectParser(
             )
         if not isinstance(orig_value, dict):
             raise ManifestParseException(
-                f"The attribute {attribute_path.path} must be a non-empty mapping.{doc_ref}"
+                f"The attribute {attribute_path.path_container_lc} must be a non-empty mapping.{doc_ref}"
             )
         if not orig_value:
             raise ManifestParseException(
-                f"The attribute {attribute_path.path} must be a non-empty mapping.{doc_ref}"
+                f"The attribute {attribute_path.path_container_lc} must be a non-empty mapping.{doc_ref}"
             )
         result = {}
         unknown_keys = orig_value.keys() - self._parsers.keys()
@@ -560,7 +598,7 @@ class DispatchingObjectParser(
                 )
             remaining_valid_attribute_names = ", ".join(remaining_valid_attributes)
             raise ManifestParseException(
-                f'The attribute "{first_key}" is not applicable at {attribute_path.path}(with the current set'
+                f'The attribute "{first_key}" is not applicable at {attribute_path.path} (with the current set'
                 " of plugins). Possible attributes available (and not already used) are:"
                 f" {remaining_valid_attribute_names}.{doc_ref}"
             )
@@ -570,7 +608,10 @@ class DispatchingObjectParser(
             if value is None:
                 if isinstance(provided_parser.parser, DispatchingObjectParser):
                     provided_parser.handler(
-                        key, {}, attribute_path[key], parser_context
+                        key,
+                        {},
+                        attribute_path[key],
+                        parser_context,
                     )
                 continue
             value_path = attribute_path[key]
@@ -597,6 +638,8 @@ class PackageContextData(Generic[TP]):
 class InPackageContextParser(
     DelegatingDeclarativeInputParser[Mapping[str, PackageContextData[TP]]]
 ):
+    __slots__ = ()
+
     def __init__(
         self,
         manifest_attribute_path_template: str,
@@ -616,6 +659,11 @@ class InPackageContextParser(
         parser_context: Optional["ParserContextData"] = None,
     ) -> TP:
         assert parser_context is not None
+        check_integration_mode(
+            attribute_path,
+            parser_context,
+            self._expected_debputy_integration_mode,
+        )
         doc_ref = ""
         if self.reference_documentation_url is not None:
             doc_ref = (
@@ -623,7 +671,7 @@ class InPackageContextParser(
             )
         if not isinstance(orig_value, dict) or not orig_value:
             raise ManifestParseException(
-                f"The attribute {attribute_path.path} must be a non-empty mapping.{doc_ref}"
+                f"The attribute {attribute_path.path_container_lc} must be a non-empty mapping.{doc_ref}"
             )
         delegate = self.delegate
         result = {}
@@ -720,64 +768,6 @@ class DeclarativeValuelessKeywordInputParser(DeclarativeInputParser[None]):
         raise ManifestParseException(
             f"Expected attribute {path.path} to be a string.{doc_ref}"
         )
-
-
-SUPPORTED_DISPATCHABLE_TABLE_PARSERS = {
-    InstallRule: "installations",
-    TransformationRule: "packages.{{PACKAGE}}.transformations",
-    DpkgMaintscriptHelperCommand: "packages.{{PACKAGE}}.conffile-management",
-    ManifestCondition: "*.when",
-}
-
-OPARSER_MANIFEST_ROOT = "<ROOT>"
-OPARSER_PACKAGES_ROOT = "packages"
-OPARSER_PACKAGES = "packages.{{PACKAGE}}"
-OPARSER_MANIFEST_DEFINITIONS = "definitions"
-
-SUPPORTED_DISPATCHABLE_OBJECT_PARSERS = {
-    OPARSER_MANIFEST_ROOT: reference_documentation(
-        reference_documentation_url=f"{DEBPUTY_DOC_ROOT_DIR}/MANIFEST-FORMAT.md",
-    ),
-    OPARSER_MANIFEST_DEFINITIONS: reference_documentation(
-        title="Packager provided definitions",
-        description="Reusable packager provided definitions such as manifest variables.",
-        reference_documentation_url=f"{DEBPUTY_DOC_ROOT_DIR}/MANIFEST-FORMAT.md#packager-provided-definitions",
-    ),
-    OPARSER_PACKAGES: reference_documentation(
-        title="Binary package rules",
-        description=textwrap.dedent(
-            """\
-            Inside the manifest, the `packages` mapping can be used to define requests for the binary packages
-            you want `debputy` to produce.  Each key inside `packages` must be the name of a binary package
-            defined in `debian/control`.  The value is a dictionary defining which features that `debputy`
-            should apply to that binary package.  An example could be:
-
-                packages:
-                    foo:
-                        transformations:
-                            - create-symlink:
-                                  path: usr/share/foo/my-first-symlink
-                                  target: /usr/share/bar/symlink-target
-                            - create-symlink:
-                                  path: usr/lib/{{DEB_HOST_MULTIARCH}}/my-second-symlink
-                                  target: /usr/lib/{{DEB_HOST_MULTIARCH}}/baz/symlink-target
-                    bar:
-                        transformations:
-                        - create-directories:
-                           - some/empty/directory.d
-                           - another/empty/integration-point.d
-                        - create-directories:
-                             path: a/third-empty/directory.d
-                             owner: www-data
-                             group: www-data
-
-            In this case, `debputy` will create some symlinks inside the `foo` package and some directories for
-            the `bar` package.  The following subsections define the keys you can use under each binary package.
-        """
-        ),
-        reference_documentation_url=f"{DEBPUTY_DOC_ROOT_DIR}/MANIFEST-FORMAT.md#binary-package-rules",
-    ),
-}
 
 
 @dataclasses.dataclass(slots=True)
@@ -1151,6 +1141,7 @@ class KnownPackagingFileInfo(DebputyParsedContent):
     default_priority: NotRequired[int]
     post_formatting_rewrite: NotRequired[Literal["period-to-underscore"]]
     packageless_is_fallback_for_all_packages: NotRequired[bool]
+    has_active_command: NotRequired[bool]
 
 
 @dataclasses.dataclass(slots=True)
@@ -1161,10 +1152,28 @@ class PluginProvidedKnownPackagingFile:
     plugin_metadata: DebputyPluginMetadata
 
 
+class BuildSystemAutoDetector(Protocol):
+
+    def __call__(self, source_root: VirtualPath, *args: Any, **kwargs: Any) -> bool: ...
+
+
 @dataclasses.dataclass(slots=True, frozen=True)
 class PluginProvidedTypeMapping:
     mapped_type: TypeMapping[Any, Any]
     reference_documentation: Optional[TypeMappingDocumentation]
+    plugin_metadata: DebputyPluginMetadata
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class PluginProvidedBuildSystemAutoDetection(Generic[BSR]):
+    manifest_keyword: str
+    build_system_rule_type: Type[BSR]
+    detector: BuildSystemAutoDetector
+    constructor: Callable[
+        ["BuildRuleParsedFormat", AttributePath, "HighLevelManifest"],
+        BSR,
+    ]
+    auto_detection_shadow_build_systems: FrozenSet[str]
     plugin_metadata: DebputyPluginMetadata
 
 

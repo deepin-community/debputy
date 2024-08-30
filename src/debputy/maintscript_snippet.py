@@ -1,7 +1,7 @@
 import dataclasses
 from typing import Sequence, Optional, List, Literal, Iterable, Dict, Self
 
-from debputy.manifest_parser.base_types import DebputyDispatchableType
+from debputy.manifest_parser.tagging_types import DebputyDispatchableType
 from debputy.manifest_parser.util import AttributePath
 
 STD_CONTROL_SCRIPTS = frozenset(

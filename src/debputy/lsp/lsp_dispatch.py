@@ -1,26 +1,42 @@
 import asyncio
-import os.path
 from typing import (
     Dict,
     Sequence,
     Union,
     Optional,
     TypeVar,
-    Callable,
     Mapping,
     List,
-    Tuple,
+    TYPE_CHECKING,
 )
 
-from lsprotocol.types import (
+from debputy import __version__
+from debputy.lsp.lsp_features import (
+    DIAGNOSTIC_HANDLERS,
+    COMPLETER_HANDLERS,
+    HOVER_HANDLERS,
+    SEMANTIC_TOKENS_FULL_HANDLERS,
+    CODE_ACTION_HANDLERS,
+    SEMANTIC_TOKENS_LEGEND,
+    WILL_SAVE_WAIT_UNTIL_HANDLERS,
+    FORMAT_FILE_HANDLERS,
+    _DispatchRule,
+    C,
+    TEXT_DOC_INLAY_HANDLERS,
+)
+from debputy.util import _info
+from debputy.lsprotocol.types import (
     DidOpenTextDocumentParams,
     DidChangeTextDocumentParams,
     TEXT_DOCUMENT_DID_CHANGE,
     TEXT_DOCUMENT_DID_OPEN,
     TEXT_DOCUMENT_COMPLETION,
+    TEXT_DOCUMENT_INLAY_HINT,
     CompletionList,
     CompletionItem,
     CompletionParams,
+    InlayHintParams,
+    InlayHint,
     TEXT_DOCUMENT_HOVER,
     TEXT_DOCUMENT_FOLDING_RANGE,
     FoldingRange,
@@ -34,35 +50,40 @@ from lsprotocol.types import (
     CodeAction,
     CodeActionParams,
     SemanticTokensRegistrationOptions,
+    TextEdit,
+    TEXT_DOCUMENT_WILL_SAVE_WAIT_UNTIL,
+    WillSaveTextDocumentParams,
+    TEXT_DOCUMENT_FORMATTING,
+    INITIALIZE,
+    InitializeParams,
 )
-
-from debputy import __version__
-from debputy.lsp.lsp_features import (
-    DIAGNOSTIC_HANDLERS,
-    COMPLETER_HANDLERS,
-    HOVER_HANDLERS,
-    SEMANTIC_TOKENS_FULL_HANDLERS,
-    CODE_ACTION_HANDLERS,
-    SEMANTIC_TOKENS_LEGEND,
-)
-from debputy.util import _info
 
 _DOCUMENT_VERSION_TABLE: Dict[str, int] = {}
 
-try:
-    from pygls.server import LanguageServer
-    from pygls.workspace import TextDocument
+
+if TYPE_CHECKING:
+    try:
+        from pygls.server import LanguageServer
+    except ImportError:
+        pass
+
     from debputy.lsp.debputy_ls import DebputyLanguageServer
 
     DEBPUTY_LANGUAGE_SERVER = DebputyLanguageServer("debputy", f"v{__version__}")
-except ImportError as e:
+else:
+    try:
+        from pygls.server import LanguageServer
+        from debputy.lsp.debputy_ls import DebputyLanguageServer
 
-    class Mock:
+        DEBPUTY_LANGUAGE_SERVER = DebputyLanguageServer("debputy", f"v{__version__}")
+    except ImportError:
 
-        def feature(self, *args, **kwargs):
-            return lambda x: x
+        class Mock:
 
-    DEBPUTY_LANGUAGE_SERVER = Mock()
+            def feature(self, *args, **kwargs):
+                return lambda x: x
+
+        DEBPUTY_LANGUAGE_SERVER = Mock()
 
 
 P = TypeVar("P")
@@ -75,21 +96,30 @@ def is_doc_at_version(uri: str, version: int) -> bool:
     return dv == version
 
 
-def determine_language_id(doc: "TextDocument") -> Tuple[str, str]:
-    lang_id = doc.language_id
-    if lang_id and not lang_id.isspace():
-        return "declared", lang_id
-    path = doc.path
-    try:
-        last_idx = path.rindex("debian/")
-    except ValueError:
-        return "filename", os.path.basename(path)
-    guess_language_id = path[last_idx:]
-    return "filename", guess_language_id
+@DEBPUTY_LANGUAGE_SERVER.feature(INITIALIZE)
+async def _on_initialize(
+    ls: "DebputyLanguageServer",
+    _: InitializeParams,
+) -> None:
+    await ls.on_initialize()
 
 
 @DEBPUTY_LANGUAGE_SERVER.feature(TEXT_DOCUMENT_DID_OPEN)
+async def _open_document(
+    ls: "DebputyLanguageServer",
+    params: DidChangeTextDocumentParams,
+) -> None:
+    await _open_or_changed_document(ls, params)
+
+
 @DEBPUTY_LANGUAGE_SERVER.feature(TEXT_DOCUMENT_DID_CHANGE)
+async def _changed_document(
+    ls: "DebputyLanguageServer",
+    params: DidChangeTextDocumentParams,
+) -> None:
+    await _open_or_changed_document(ls, params)
+
+
 async def _open_or_changed_document(
     ls: "DebputyLanguageServer",
     params: Union[DidOpenTextDocumentParams, DidChangeTextDocumentParams],
@@ -99,15 +129,17 @@ async def _open_or_changed_document(
     doc = ls.workspace.get_text_document(doc_uri)
 
     _DOCUMENT_VERSION_TABLE[doc_uri] = version
-    id_source, language_id = determine_language_id(doc)
-    handler = DIAGNOSTIC_HANDLERS.get(language_id)
+    id_source, language_id, normalized_filename = ls.determine_language_id(doc)
+    handler = _resolve_handler(DIAGNOSTIC_HANDLERS, language_id, normalized_filename)
     if handler is None:
         _info(
-            f"Opened/Changed document: {doc.path} ({language_id}, {id_source}) - no diagnostics handler"
+            f"Opened/Changed document: {doc.path} ({language_id}, {id_source},"
+            f" normalized filename: {normalized_filename}) - no diagnostics handler"
         )
         return
     _info(
-        f"Opened/Changed document: {doc.path} ({language_id}, {id_source}) - running diagnostics for doc version {version}"
+        f"Opened/Changed document: {doc.path} ({language_id}, {id_source}, normalized filename: {normalized_filename})"
+        f" - running diagnostics for doc version {version}"
     )
     last_publish_count = -1
 
@@ -154,6 +186,20 @@ def _hover(
         params,
         HOVER_HANDLERS,
         "Hover doc request",
+    )
+
+
+@DEBPUTY_LANGUAGE_SERVER.feature(TEXT_DOCUMENT_INLAY_HINT)
+def _doc_inlay_hint(
+    ls: "DebputyLanguageServer",
+    params: InlayHintParams,
+) -> Optional[List[InlayHint]]:
+    return _dispatch_standard_handler(
+        ls,
+        params.text_document.uri,
+        params,
+        TEXT_DOC_INLAY_HANDLERS,
+        "Inlay hint (doc) request",
     )
 
 
@@ -205,27 +251,71 @@ def _semantic_tokens_full(
     )
 
 
+@DEBPUTY_LANGUAGE_SERVER.feature(TEXT_DOCUMENT_WILL_SAVE_WAIT_UNTIL)
+def _will_save_wait_until(
+    ls: "DebputyLanguageServer",
+    params: WillSaveTextDocumentParams,
+) -> Optional[Sequence[TextEdit]]:
+    return _dispatch_standard_handler(
+        ls,
+        params.text_document.uri,
+        params,
+        WILL_SAVE_WAIT_UNTIL_HANDLERS,
+        "On-save formatting",
+    )
+
+
+@DEBPUTY_LANGUAGE_SERVER.feature(TEXT_DOCUMENT_FORMATTING)
+def _format_document(
+    ls: "DebputyLanguageServer",
+    params: WillSaveTextDocumentParams,
+) -> Optional[Sequence[TextEdit]]:
+    return _dispatch_standard_handler(
+        ls,
+        params.text_document.uri,
+        params,
+        FORMAT_FILE_HANDLERS,
+        "Full document formatting",
+    )
+
+
 def _dispatch_standard_handler(
     ls: "DebputyLanguageServer",
     doc_uri: str,
     params: P,
-    handler_table: Mapping[str, Callable[[L, P], R]],
+    handler_table: Mapping[str, List[_DispatchRule[C]]],
     request_type: str,
-) -> R:
+) -> Optional[R]:
     doc = ls.workspace.get_text_document(doc_uri)
 
-    id_source, language_id = determine_language_id(doc)
-    handler = handler_table.get(language_id)
+    id_source, language_id, normalized_filename = ls.determine_language_id(doc)
+    handler = _resolve_handler(handler_table, language_id, normalized_filename)
     if handler is None:
         _info(
-            f"{request_type} for document: {doc.path} ({language_id}, {id_source}) - no handler"
+            f"{request_type} for document: {doc.path} ({language_id}, {id_source},"
+            f" normalized filename: {normalized_filename}) - no handler"
         )
-        return
+        return None
     _info(
-        f"{request_type} for document: {doc.path} ({language_id}, {id_source}) - delegating to handler"
+        f"{request_type} for document: {doc.path} ({language_id}, {id_source},"
+        f" normalized filename: {normalized_filename}) - delegating to handler"
     )
 
     return handler(
         ls,
         params,
     )
+
+
+def _resolve_handler(
+    handler_table: Mapping[str, List[_DispatchRule[C]]],
+    language_id: str,
+    normalized_filename: str,
+) -> Optional[C]:
+    dispatch_rules = handler_table.get(language_id)
+    if not dispatch_rules:
+        return None
+    for dispatch_rule in dispatch_rules:
+        if dispatch_rule.language_dispatch.filename_match(normalized_filename):
+            return dispatch_rule.handler
+    return None

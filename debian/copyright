@@ -23,7 +23,7 @@ License: GPL-2+
 Files: src/debputy/lsp/* src/debputy/linting/*
 Copyright: 2024 Niels Thykier <niels@thykier.net>
 Comment: Dual-licensed with the intention that parts can be moved to debpkg-metadata.
-License: GPL-2+ or Apache-2.0
+License: GPL-2+ or Apache-2
 
 Files: src/debputy/lsp/text_edit.py
 Copyright: Copyright 2017-2020 Palantir Technologies, Inc.
@@ -53,6 +53,12 @@ License: GPL-2+
 Comment: Embedded copy of part of `python-debian` with patches. The patches are pending
  review at https://salsa.debian.org/python-debian-team/python-debian/-/merge_requests/130
 
+Files: src/debputy/lsp/vendoring/wrap_and_sort.py
+Copyright: 2008-2018, Benjamin Drung <bdrung@debian.org>
+           2010-2011, Stefano Rivera <stefanor@ubuntu.com>
+License: ISC
+Comment: Embedded copy of part of `devscripts` with patches to avoid pulling in `devscripts`.
+
 License: GPL-2+
  On Debian systems the full text of the GNU General Public License version 2
  can be found in the `/usr/share/common-licenses/GPL-2' file.
@@ -60,3 +66,16 @@ License: GPL-2+
 License: Apache-2
  On Debian systems the full text of the Apache License version 2
  can be found in the `/usr/share/common-licenses/Apache-2.0' file.
+
+License: ISC
+ Permission to use, copy, modify, and/or distribute this software for any
+ purpose with or without fee is hereby granted, provided that the above
+ copyright notice and this permission notice appear in all copies.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+ REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
+ AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+ INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+ LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+ OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+ PERFORMANCE OF THIS SOFTWARE.

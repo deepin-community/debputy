@@ -1,6 +1,7 @@
 import dataclasses
 import functools
 import itertools
+import operator
 import re
 import sys
 import textwrap
@@ -19,20 +20,49 @@ from typing import (
     Callable,
     Tuple,
     Any,
+    Set,
+    TYPE_CHECKING,
+    Sequence,
 )
 
-from debian.debian_support import DpkgArchTable
-from lsprotocol.types import DiagnosticSeverity, Diagnostic, DiagnosticTag, Range
+from debian.debian_support import DpkgArchTable, Version
 
+from debputy.lsprotocol.types import (
+    DiagnosticSeverity,
+    Diagnostic,
+    DiagnosticTag,
+    Range,
+    TextEdit,
+    Position,
+    CompletionItem,
+    MarkupContent,
+    CompletionItemTag,
+    MarkupKind,
+    CompletionItemKind,
+    CompletionItemLabelDetails,
+)
+
+from debputy.filesystem_scan import VirtualPathBase
+from debputy.linting.lint_util import LintState
+from debputy.lsp.diagnostics import DiagnosticData
+from debputy.lsp.lsp_reference_keyword import (
+    ALL_PUBLIC_NAMED_STYLES,
+    Keyword,
+    allowed_values,
+    format_comp_item_synopsis_doc,
+    UsageHint,
+)
 from debputy.lsp.quickfixes import (
     propose_correct_text_quick_fix,
     propose_remove_line_quick_fix,
+    propose_remove_range_quick_fix,
 )
+from debputy.lsp.text_edit import apply_text_edits
 from debputy.lsp.text_util import (
     normalize_dctrl_field_name,
     LintCapablePositionCodec,
-    detect_possible_typo,
     te_range_to_lsp,
+    trim_end_of_line_whitespace,
 )
 from debputy.lsp.vendoring._deb822_repro.parsing import (
     Deb822KeyValuePairElement,
@@ -46,6 +76,9 @@ from debputy.lsp.vendoring._deb822_repro.parsing import (
     Deb822ParsedValueElement,
     LIST_UPLOADERS_INTERPRETATION,
     _parse_whitespace_list_value,
+    parse_deb822_file,
+    Deb822ParsedTokenList,
+    Deb822ValueLineElement,
 )
 from debputy.lsp.vendoring._deb822_repro.tokens import (
     Deb822FieldNameToken,
@@ -55,7 +88,12 @@ from debputy.lsp.vendoring._deb822_repro.tokens import (
     _RE_WHITESPACE_SEPARATED_WORD_LIST,
     Deb822SpaceSeparatorToken,
 )
-from debputy.util import PKGNAME_REGEX
+from debputy.lsp.vendoring._deb822_repro.types import FormatterCallback
+from debputy.lsp.vendoring._deb822_repro.types import TE
+from debputy.lsp.vendoring.wrap_and_sort import _sort_packages_key
+from debputy.path_matcher import BasenameGlobMatch
+from debputy.plugin.api import VirtualPath
+from debputy.util import PKGNAME_REGEX, _info, detect_possible_typo
 
 try:
     from debputy.lsp.vendoring._deb822_repro.locatable import (
@@ -67,12 +105,23 @@ except ImportError:
     pass
 
 
+if TYPE_CHECKING:
+    from debputy.lsp.maint_prefs import EffectiveFormattingPreference
+
+
 F = TypeVar("F", bound="Deb822KnownField")
 S = TypeVar("S", bound="StanzaMetadata")
 
 
 # FIXME: should go into python3-debian
 _RE_COMMA = re.compile("([^,]*),([^,]*)")
+_RE_SYNOPSIS_STARTS_WITH_ARTICLE = re.compile(r"^\s*(an?|the)(?:\s|$)", re.I)
+_RE_SV = re.compile(r"(\d+[.]\d+[.]\d+)([.]\d+)?")
+_RE_SYNOPSIS_IS_TEMPLATE = re.compile(
+    r"^\s*(missing|<insert up to \d+ chars description>)$"
+)
+_RE_SYNOPSIS_IS_TOO_SHORT = re.compile(r"^\s*(\S+)$")
+CURRENT_STANDARDS_VERSION = Version("4.7.0")
 
 
 @_value_line_tokenizer
@@ -104,22 +153,60 @@ LIST_COMMA_OR_SPACE_SEPARATED_INTERPRETATION = ListInterpretation(
     _parse_whitespace_list_value,
     Deb822ParsedValueElement,
     Deb822SpaceSeparatorToken,
-    Deb822SpaceSeparatorToken,
+    lambda: Deb822SpaceSeparatorToken(","),
     _parsed_value_render_factory,
 )
 
 CustomFieldCheck = Callable[
     [
         "F",
+        Deb822FileElement,
         Deb822KeyValuePairElement,
+        "TERange",
         "TERange",
         Deb822ParagraphElement,
         "TEPosition",
-        "LintCapablePositionCodec",
-        List[str],
+        LintState,
     ],
     Iterable[Diagnostic],
 ]
+
+
+@functools.lru_cache
+def all_package_relationship_fields() -> Mapping[str, str]:
+    # TODO: Pull from `dpkg-dev` when possible fallback only to the static list.
+    return {
+        f.lower(): f
+        for f in (
+            "Pre-Depends",
+            "Depends",
+            "Recommends",
+            "Suggests",
+            "Enhances",
+            "Conflicts",
+            "Breaks",
+            "Replaces",
+            "Provides",
+            "Built-Using",
+            "Static-Built-Using",
+        )
+    }
+
+
+@functools.lru_cache
+def all_source_relationship_fields() -> Mapping[str, str]:
+    # TODO: Pull from `dpkg-dev` when possible fallback only to the static list.
+    return {
+        f.lower(): f
+        for f in (
+            "Build-Depends",
+            "Build-Depends-Arch",
+            "Build-Depends-Indep",
+            "Build-Conflicts",
+            "Build-Conflicts-Arch",
+            "Build-Conflicts-Indep",
+        )
+    }
 
 
 ALL_SECTIONS_WITHOUT_COMPONENT = frozenset(
@@ -141,9 +228,11 @@ ALL_SECTIONS_WITHOUT_COMPONENT = frozenset(
         "gnome",
         "gnu-r",
         "gnustep",
+        "golang",
         "graphics",
         "hamradio",
         "haskell",
+        "httpd",
         "interpreters",
         "introspection",
         "java",
@@ -200,28 +289,7 @@ def _fields(*fields: F) -> Mapping[str, F]:
     return {normalize_dctrl_field_name(f.name.lower()): f for f in fields}
 
 
-@dataclasses.dataclass(slots=True, frozen=True)
-class Keyword:
-    value: str
-    hover_text: Optional[str] = None
-    is_obsolete: bool = False
-    replaced_by: Optional[str] = None
-    is_exclusive: bool = False
-    """For keywords in fields that allow multiple keywords, the `is_exclusive` can be
-    used for keywords that cannot be used with other keywords. As an example, the `all`
-    value in `Architecture` of `debian/control` cannot be used with any other architecture.
-    """
-
-
-def _allowed_values(*values: Union[str, Keyword]) -> Mapping[str, Keyword]:
-    as_keywords = [k if isinstance(k, Keyword) else Keyword(k) for k in values]
-    as_mapping = {k.value: k for k in as_keywords if k.value}
-    # Simple bug check
-    assert len(as_keywords) == len(as_mapping)
-    return as_mapping
-
-
-ALL_SECTIONS = _allowed_values(
+ALL_SECTIONS = allowed_values(
     *[
         s if c is None else f"{c}/{s}"
         for c, s in itertools.product(
@@ -231,9 +299,11 @@ ALL_SECTIONS = _allowed_values(
     ]
 )
 
-ALL_PRIORITIES = _allowed_values(
+ALL_PRIORITIES = allowed_values(
     Keyword(
         "required",
+        usage_hint="rare",
+        synopsis_doc="Package is Essential or an Essential package needs it (and is not a library)",
         hover_text=textwrap.dedent(
             """\
             The package is necessary for the proper functioning of the system (read: dpkg needs it).
@@ -247,6 +317,8 @@ ALL_PRIORITIES = _allowed_values(
     ),
     Keyword(
         "important",
+        usage_hint="rare",
+        synopsis_doc="Bare minimum of commonly-expected and necessary tools",
         hover_text=textwrap.dedent(
             """\
             The *important* packages are a bare minimum of commonly-expected and necessary tools.
@@ -260,6 +332,8 @@ ALL_PRIORITIES = _allowed_values(
     ),
     Keyword(
         "standard",
+        usage_hint="rare",
+        synopsis_doc="If your distribution installer would install this by default (not for libraries)",
         hover_text=textwrap.dedent(
             """\
             These packages provide a reasonable small but not too limited character-mode system.  This is
@@ -276,6 +350,8 @@ ALL_PRIORITIES = _allowed_values(
     ),
     Keyword(
         "optional",
+        synopsis_doc="The default priority.",
+        sort_text="aa-optional",
         hover_text="This is the default priority and used by the majority of all packages"
         " in the Debian archive",
     ),
@@ -283,16 +359,21 @@ ALL_PRIORITIES = _allowed_values(
         "extra",
         is_obsolete=True,
         replaced_by="optional",
+        sort_text="zz-extra",
+        synopsis_doc="Obsolete alias of `optional`",
         hover_text="Obsolete alias of `optional`.",
     ),
 )
 
 
-def all_architectures_and_wildcards(arch2table) -> Iterable[Union[str, Keyword]]:
+def all_architectures_and_wildcards(
+    arch2table, *, allow_negations: bool = False
+) -> Iterable[Union[str, Keyword]]:
     wildcards = set()
     yield Keyword(
         "any",
         is_exclusive=True,
+        synopsis_doc="Build once per machine architecture (native code, such as C/C++, interpreter to C bindings)",
         hover_text=textwrap.dedent(
             """\
             The package is an architecture dependent package and need to be compiled for each and every
@@ -306,6 +387,7 @@ def all_architectures_and_wildcards(arch2table) -> Iterable[Union[str, Keyword]]
     yield Keyword(
         "all",
         is_exclusive=True,
+        synopsis_doc="Independent of machine architecture (scripts, Java without JNI, data or documentation)",
         hover_text=textwrap.dedent(
             """\
             The package is an architecture independent package.  This is typically fitting for packages containing
@@ -318,66 +400,137 @@ def all_architectures_and_wildcards(arch2table) -> Iterable[Union[str, Keyword]]
     )
     for arch_name, quad_tuple in arch2table.items():
         yield arch_name
+        if allow_negations:
+            yield f"!{arch_name}"
         cpu_wc = "any-" + quad_tuple.cpu_name
         os_wc = quad_tuple.os_name + "-any"
         if cpu_wc not in wildcards:
             yield cpu_wc
+            if allow_negations:
+                yield f"!{cpu_wc}"
             wildcards.add(cpu_wc)
         if os_wc not in wildcards:
             yield os_wc
+            if allow_negations:
+                yield f"!{os_wc}"
             wildcards.add(os_wc)
         # Add the remaining wildcards
 
 
 @functools.lru_cache
-def dpkg_arch_and_wildcards() -> FrozenSet[str]:
+def dpkg_arch_and_wildcards(*, allow_negations=False) -> FrozenSet[Union[str, Keyword]]:
     dpkg_arch_table = DpkgArchTable.load_arch_table()
-    return frozenset(all_architectures_and_wildcards(dpkg_arch_table._arch2table))
+    return frozenset(
+        all_architectures_and_wildcards(
+            dpkg_arch_table._arch2table,
+            allow_negations=allow_negations,
+        )
+    )
 
 
-def _extract_first_value_and_position(
+def extract_first_value_and_position(
     kvpair: Deb822KeyValuePairElement,
     stanza_pos: "TEPosition",
-    position_codec: "LintCapablePositionCodec",
-    lines: List[str],
+    lint_state: LintState,
+    *,
+    interpretation: Interpretation[
+        Deb822ParsedTokenList[Any, Any]
+    ] = LIST_SPACE_SEPARATED_INTERPRETATION,
 ) -> Tuple[Optional[str], Optional[Range]]:
     kvpair_pos = kvpair.position_in_parent().relative_to(stanza_pos)
     value_element_pos = kvpair.value_element.position_in_parent().relative_to(
         kvpair_pos
     )
-    for value_ref in kvpair.interpret_as(
-        LIST_SPACE_SEPARATED_INTERPRETATION
-    ).iter_value_references():
+    for value_ref in kvpair.interpret_as(interpretation).iter_value_references():
         v = value_ref.value
         section_value_loc = value_ref.locatable
         value_range_te = section_value_loc.range_in_parent().relative_to(
             value_element_pos
         )
-        value_range_server_units = te_range_to_lsp(value_range_te)
-        value_range = position_codec.range_to_client_units(
-            lines, value_range_server_units
+        section_range_server_units = te_range_to_lsp(value_range_te)
+        section_range = lint_state.position_codec.range_to_client_units(
+            lint_state.lines,
+            section_range_server_units,
         )
-        return v, value_range
+        return v, section_range
     return None, None
+
+
+def _sv_field_validation(
+    _known_field: "F",
+    _deb822_file: Deb822FileElement,
+    kvpair: Deb822KeyValuePairElement,
+    _kvpair_range: "TERange",
+    _field_name_range_te: "TERange",
+    _stanza: Deb822ParagraphElement,
+    stanza_position: "TEPosition",
+    lint_state: LintState,
+) -> Iterable[Diagnostic]:
+    sv_value, sv_value_range = extract_first_value_and_position(
+        kvpair,
+        stanza_position,
+        lint_state,
+    )
+    m = _RE_SV.fullmatch(sv_value)
+    if m is None:
+        yield Diagnostic(
+            sv_value_range,
+            f'Not a valid version. Current version is "{CURRENT_STANDARDS_VERSION}"',
+            severity=DiagnosticSeverity.Warning,
+            source="debputy",
+        )
+        return
+
+    sv_version = Version(sv_value)
+    if sv_version < CURRENT_STANDARDS_VERSION:
+        yield Diagnostic(
+            sv_value_range,
+            f"Latest Standards-Version is {CURRENT_STANDARDS_VERSION}",
+            severity=DiagnosticSeverity.Information,
+            source="debputy",
+        )
+        return
+    extra = m.group(2)
+    if extra:
+        extra_len = lint_state.position_codec.client_num_units(extra)
+        yield Diagnostic(
+            Range(
+                Position(
+                    sv_value_range.end.line,
+                    sv_value_range.end.character - extra_len,
+                ),
+                sv_value_range.end,
+            ),
+            "Unnecessary version segment. This part of the version is only used for editorial changes",
+            severity=DiagnosticSeverity.Information,
+            source="debputy",
+            data=DiagnosticData(
+                quickfixes=[
+                    propose_remove_range_quick_fix(
+                        proposed_title="Remove unnecessary version part"
+                    )
+                ]
+            ),
+        )
 
 
 def _dctrl_ma_field_validation(
     _known_field: "F",
+    _deb822_file: Deb822FileElement,
     _kvpair: Deb822KeyValuePairElement,
-    _field_range: "TERange",
+    _kvpair_range: "TERange",
+    _field_name_range: "TERange",
     stanza: Deb822ParagraphElement,
     stanza_position: "TEPosition",
-    position_codec: "LintCapablePositionCodec",
-    lines: List[str],
+    lint_state: LintState,
 ) -> Iterable[Diagnostic]:
-    ma_kvpair = stanza.get_kvpair_element("Multi-Arch", use_get=True)
+    ma_kvpair = stanza.get_kvpair_element(("Multi-Arch", 0), use_get=True)
     arch = stanza.get("Architecture", "any")
     if arch == "all" and ma_kvpair is not None:
-        ma_value, ma_value_range = _extract_first_value_and_position(
+        ma_value, ma_value_range = extract_first_value_and_position(
             ma_kvpair,
             stanza_position,
-            position_codec,
-            lines,
+            lint_state,
         )
         if ma_value == "same":
             yield Diagnostic(
@@ -390,18 +543,19 @@ def _dctrl_ma_field_validation(
 
 def _udeb_only_field_validation(
     known_field: "F",
+    _deb822_file: Deb822FileElement,
     _kvpair: Deb822KeyValuePairElement,
-    field_range_te: "TERange",
+    _kvpair_range: "TERange",
+    field_name_range: "TERange",
     stanza: Deb822ParagraphElement,
     _stanza_position: "TEPosition",
-    position_codec: "LintCapablePositionCodec",
-    lines: List[str],
+    lint_state: LintState,
 ) -> Iterable[Diagnostic]:
     package_type = stanza.get("Package-Type")
     if package_type != "udeb":
-        field_range_server_units = te_range_to_lsp(field_range_te)
-        field_range = position_codec.range_to_client_units(
-            lines,
+        field_range_server_units = te_range_to_lsp(field_name_range)
+        field_range = lint_state.position_codec.range_to_client_units(
+            lint_state.lines,
             field_range_server_units,
         )
         yield Diagnostic(
@@ -412,20 +566,44 @@ def _udeb_only_field_validation(
         )
 
 
+def _complete_only_in_arch_dep_pkgs(
+    stanza_parts: Iterable[Deb822ParagraphElement],
+) -> bool:
+    for stanza in stanza_parts:
+        arch = stanza.get("Architecture")
+        if arch is None:
+            continue
+        archs = arch.split()
+        return "all" not in archs
+    return False
+
+
+def _complete_only_for_udeb_pkgs(
+    stanza_parts: Iterable[Deb822ParagraphElement],
+) -> bool:
+    for stanza in stanza_parts:
+        for option in ("Package-Type", "XC-Package-Type"):
+            pkg_type = stanza.get(option)
+            if pkg_type is not None:
+                return pkg_type == "udeb"
+    return False
+
+
 def _arch_not_all_only_field_validation(
     known_field: "F",
+    _deb822_file: Deb822FileElement,
     _kvpair: Deb822KeyValuePairElement,
-    field_range_te: "TERange",
+    _kvpair_range_te: "TERange",
+    field_name_range_te: "TERange",
     stanza: Deb822ParagraphElement,
     _stanza_position: "TEPosition",
-    position_codec: "LintCapablePositionCodec",
-    lines: List[str],
+    lint_state: LintState,
 ) -> Iterable[Diagnostic]:
     architecture = stanza.get("Architecture")
     if architecture == "all":
-        field_range_server_units = te_range_to_lsp(field_range_te)
-        field_range = position_codec.range_to_client_units(
-            lines,
+        field_range_server_units = te_range_to_lsp(field_name_range_te)
+        field_range = lint_state.position_codec.range_to_client_units(
+            lint_state.lines,
             field_range_server_units,
         )
         yield Diagnostic(
@@ -433,6 +611,141 @@ def _arch_not_all_only_field_validation(
             f"The {known_field.name} field is not applicable to arch:all packages (`Architecture: all`)",
             severity=DiagnosticSeverity.Warning,
             source="debputy",
+        )
+
+
+def _single_line_span_to_client_range(
+    span: Tuple[int, int],
+    relative_to: "TEPosition",
+    lint_state: LintState,
+) -> Range:
+    range_server_units = Range(
+        Position(
+            relative_to.line_position,
+            relative_to.cursor_position + span[0],
+        ),
+        Position(
+            relative_to.line_position,
+            relative_to.cursor_position + span[1],
+        ),
+    )
+    return lint_state.position_codec.range_to_client_units(
+        lint_state.lines,
+        range_server_units,
+    )
+
+
+def _check_synopsis(
+    synopsis_value_line: Deb822ValueLineElement,
+    synopsis_range_te: "TERange",
+    field_name_range_te: "TERange",
+    package: Optional[str],
+    lint_state: LintState,
+) -> Iterable[Diagnostic]:
+    # This function would compute range would be wrong if there is a comment
+    assert synopsis_value_line.comment_element is None
+    synopsis_text_with_leading_space = synopsis_value_line.convert_to_text().rstrip()
+    if not synopsis_text_with_leading_space:
+        yield Diagnostic(
+            lint_state.position_codec.range_to_client_units(
+                lint_state.lines,
+                te_range_to_lsp(field_name_range_te),
+            ),
+            "Package synopsis is missing",
+            severity=DiagnosticSeverity.Warning,
+            source="debputy",
+        )
+        return
+    synopsis_text_trimmed = synopsis_text_with_leading_space.lstrip()
+    synopsis_offset = len(synopsis_text_with_leading_space) - len(synopsis_text_trimmed)
+    # synopsis_text_trimmed_lower = synopsis_text_trimmed.lower()
+    starts_with_article = _RE_SYNOPSIS_STARTS_WITH_ARTICLE.search(
+        synopsis_text_with_leading_space
+    )
+    # TODO: Handle ${...} expansion
+    if starts_with_article:
+        yield Diagnostic(
+            _single_line_span_to_client_range(
+                starts_with_article.span(1),
+                synopsis_range_te.start_pos,
+                lint_state,
+            ),
+            "Package synopsis starts with an article (a/an/the).",
+            severity=DiagnosticSeverity.Warning,
+            source="DevRef 6.2.2",
+        )
+    if len(synopsis_text_trimmed) >= 80:
+        # Policy says `certainly under 80 characters.`, so exactly 80 characters is considered bad too.
+        span = synopsis_offset + 79, len(synopsis_text_with_leading_space)
+        yield Diagnostic(
+            _single_line_span_to_client_range(
+                span,
+                synopsis_range_te.start_pos,
+                lint_state,
+            ),
+            "Package synopsis is too long.",
+            severity=DiagnosticSeverity.Warning,
+            source="Policy 3.4.1",
+        )
+    if template_match := _RE_SYNOPSIS_IS_TEMPLATE.match(
+        synopsis_text_with_leading_space
+    ):
+        yield Diagnostic(
+            _single_line_span_to_client_range(
+                template_match.span(1),
+                synopsis_range_te.start_pos,
+                lint_state,
+            ),
+            "Package synopsis is a placeholder",
+            severity=DiagnosticSeverity.Warning,
+            source="debputy",
+        )
+    elif too_short_match := _RE_SYNOPSIS_IS_TOO_SHORT.match(
+        synopsis_text_with_leading_space
+    ):
+        yield Diagnostic(
+            _single_line_span_to_client_range(
+                too_short_match.span(1),
+                synopsis_range_te.start_pos,
+                lint_state,
+            ),
+            "Package synopsis is too short",
+            severity=DiagnosticSeverity.Warning,
+            source="debputy",
+        )
+
+
+def dctrl_description_validator(
+    _known_field: "F",
+    _deb822_file: Deb822FileElement,
+    kvpair: Deb822KeyValuePairElement,
+    kvpair_range_te: "TERange",
+    _field_name_range: "TERange",
+    stanza: Deb822ParagraphElement,
+    _stanza_position: "TEPosition",
+    lint_state: LintState,
+) -> Iterable[Diagnostic]:
+    value_lines = kvpair.value_element.value_lines
+    if not value_lines:
+        return
+    package = stanza.get("Package")
+    synopsis_value_line = value_lines[0]
+    value_range_te = kvpair.value_element.range_in_parent().relative_to(
+        kvpair_range_te.start_pos
+    )
+    if synopsis_value_line.continuation_line_token is None:
+        field_name_range_te = kvpair.field_token.range_in_parent().relative_to(
+            kvpair_range_te.start_pos
+        )
+        synopsis_range_te = synopsis_value_line.range_in_parent().relative_to(
+            value_range_te.start_pos
+        )
+        yield from _check_synopsis(
+            synopsis_value_line,
+            synopsis_range_te,
+            field_name_range_te,
+            package,
+            lint_state,
         )
 
 
@@ -444,16 +757,17 @@ def _each_value_match_regex_validation(
 
     def _validator(
         _known_field: "F",
+        _deb822_file: Deb822FileElement,
         kvpair: Deb822KeyValuePairElement,
-        field_range_te: "TERange",
+        kvpair_range_te: "TERange",
+        _field_name_range_te: "TERange",
         _stanza: Deb822ParagraphElement,
         _stanza_position: "TEPosition",
-        position_codec: "LintCapablePositionCodec",
-        lines: List[str],
+        lint_state: LintState,
     ) -> Iterable[Diagnostic]:
 
         value_element_pos = kvpair.value_element.position_in_parent().relative_to(
-            field_range_te.start_pos
+            kvpair_range_te.start_pos
         )
         for value_ref in kvpair.interpret_as(
             LIST_SPACE_SEPARATED_INTERPRETATION
@@ -463,13 +777,17 @@ def _each_value_match_regex_validation(
             if m is not None:
                 continue
 
+            if "${" in v:
+                # Ignore substvars
+                continue
+
             section_value_loc = value_ref.locatable
             value_range_te = section_value_loc.range_in_parent().relative_to(
                 value_element_pos
             )
             value_range_server_units = te_range_to_lsp(value_range_te)
-            value_range = position_codec.range_to_client_units(
-                lines, value_range_server_units
+            value_range = lint_state.position_codec.range_to_client_units(
+                lint_state.lines, value_range_server_units
             )
             yield Diagnostic(
                 value_range,
@@ -481,28 +799,603 @@ def _each_value_match_regex_validation(
     return _validator
 
 
+_DEP_OR_RELATION = re.compile(r"[|]")
+_DEP_RELATION_CLAUSE = re.compile(
+    r"""
+    ^
+    \s*
+    (?P<name_arch_qual>[-+.a-zA-Z0-9${}:]{2,})
+    \s*
+    (?: [(] \s* (?P<operator>>>|>=|=|<=|<<) \s* (?P<version> [^)]+) \s* [)] \s* )?
+    (?: \[ (?P<arch_restriction> [\s!\w\-]+) ] \s*)?
+    (?: < (?P<build_profile_restriction> .+ ) > \s*)?
+    ((?P<garbage>\S.*)\s*)?
+    $
+""",
+    re.VERBOSE | re.MULTILINE,
+)
+
+
+def _span_to_te_range(
+    text: str,
+    start_pos: int,
+    end_pos: int,
+) -> TERange:
+    prefix = text[0:start_pos]
+    prefix_plus_text = text[0:end_pos]
+
+    start_line = prefix.count("\n")
+    if start_line:
+        start_newline_offset = prefix.rindex("\n")
+        # +1 to skip past the newline
+        start_cursor_pos = start_pos - (start_newline_offset + 1)
+    else:
+        start_cursor_pos = start_pos
+
+    end_line = prefix_plus_text.count("\n")
+    if end_line == start_line:
+        end_cursor_pos = start_cursor_pos + (end_pos - start_pos)
+    else:
+        end_newline_offset = prefix_plus_text.rindex("\n")
+        end_cursor_pos = end_pos - (end_newline_offset + 1)
+
+    return TERange(
+        TEPosition(
+            start_line,
+            start_cursor_pos,
+        ),
+        TEPosition(
+            end_line,
+            end_cursor_pos,
+        ),
+    )
+
+
+def _split_w_spans(
+    v: str,
+    sep: str,
+    *,
+    offset: int = 0,
+) -> Sequence[Tuple[str, int, int]]:
+    separator_size = len(sep)
+    parts = v.split(sep)
+    for part in parts:
+        size = len(part)
+        end_offset = offset + size
+        yield part, offset, end_offset
+        offset = end_offset + separator_size
+
+
+_COLLAPSE_WHITESPACE = re.compile(r"\s+")
+
+
+def _cleanup_rel(rel: str) -> str:
+    return _COLLAPSE_WHITESPACE.sub(" ", rel.strip())
+
+
+def _text_to_te_position(text: str) -> "TEPosition":
+    newlines = text.count("\n")
+    if not newlines:
+        return TEPosition(
+            newlines,
+            len(text),
+        )
+    last_newline_offset = text.rindex("\n")
+    line_offset = len(text) - (last_newline_offset + 1)
+    return TEPosition(
+        newlines,
+        line_offset,
+    )
+
+
+def _dctrl_validate_dep(
+    known_field: "F",
+    _deb822_file: Deb822FileElement,
+    kvpair: Deb822KeyValuePairElement,
+    kvpair_range_te: "TERange",
+    _field_name_range: "TERange",
+    _stanza: Deb822ParagraphElement,
+    _stanza_position: "TEPosition",
+    lint_state: LintState,
+) -> Iterable[Diagnostic]:
+    value_element_pos = kvpair.value_element.position_in_parent().relative_to(
+        kvpair_range_te.start_pos
+    )
+    raw_value_with_comments = kvpair.value_element.convert_to_text()
+    raw_value_masked_comments = "".join(
+        (line if not line.startswith("#") else (" " * (len(line) - 1)) + "\n")
+        for line in raw_value_with_comments.splitlines(keepends=True)
+    )
+    if isinstance(known_field, DctrlRelationshipKnownField):
+        version_operators = known_field.allowed_version_operators
+        supports_or_relation = known_field.supports_or_relation
+    else:
+        version_operators = frozenset()
+        supports_or_relation = True
+
+    for rel, rel_offset, rel_end_offset in _split_w_spans(
+        raw_value_masked_comments, ","
+    ):
+        seen_relation = False
+        for or_rel, offset, end_offset in _split_w_spans(rel, "|", offset=rel_offset):
+            if or_rel.isspace():
+                continue
+            if seen_relation and not supports_or_relation:
+                separator_range_te = TERange(
+                    _text_to_te_position(raw_value_masked_comments[: offset - 1]),
+                    _text_to_te_position(raw_value_masked_comments[:offset]),
+                ).relative_to(value_element_pos)
+                separator_range = lint_state.position_codec.range_to_client_units(
+                    lint_state.lines,
+                    te_range_to_lsp(separator_range_te),
+                )
+                yield Diagnostic(
+                    lint_state.position_codec.range_to_client_units(
+                        lint_state.lines,
+                        separator_range,
+                    ),
+                    f'The field {known_field.name} does not support "|" (OR) in relations.',
+                    DiagnosticSeverity.Error,
+                    source="debputy",
+                )
+            seen_relation = True
+            m = _DEP_RELATION_CLAUSE.fullmatch(or_rel)
+
+            if m is not None:
+                garbage = m.group("garbage")
+                version_operator = m.group("operator")
+                if (
+                    version_operators
+                    and version_operator is not None
+                    and version_operator not in version_operators
+                ):
+                    operator_span = m.span("operator")
+                    v_start_offset = offset + operator_span[0]
+                    v_end_offset = offset + operator_span[1]
+                    version_problem_range_te = TERange(
+                        _text_to_te_position(
+                            raw_value_masked_comments[:v_start_offset]
+                        ),
+                        _text_to_te_position(raw_value_masked_comments[:v_end_offset]),
+                    ).relative_to(value_element_pos)
+
+                    version_problem_range = (
+                        lint_state.position_codec.range_to_client_units(
+                            lint_state.lines,
+                            te_range_to_lsp(version_problem_range_te),
+                        )
+                    )
+                    sorted_version_operators = sorted(version_operators)
+                    yield Diagnostic(
+                        lint_state.position_codec.range_to_client_units(
+                            lint_state.lines,
+                            version_problem_range,
+                        ),
+                        f'The version operator "{version_operator}" is not allowed in {known_field.name}',
+                        DiagnosticSeverity.Error,
+                        source="debputy",
+                        data=DiagnosticData(
+                            quickfixes=[
+                                propose_correct_text_quick_fix(n)
+                                for n in sorted_version_operators
+                            ]
+                        ),
+                    )
+            else:
+                garbage = None
+
+            if m is not None and not garbage:
+                continue
+            if m is not None:
+                garbage_span = m.span("garbage")
+                garbage_start, garbage_end = garbage_span
+                error_start_offset = offset + garbage_start
+                error_end_offset = offset + garbage_end
+                garbage_part = raw_value_masked_comments[
+                    error_start_offset:error_end_offset
+                ]
+            else:
+                garbage_part = None
+                error_start_offset = offset
+                error_end_offset = end_offset
+
+            problem_range_te = TERange(
+                _text_to_te_position(raw_value_masked_comments[:error_start_offset]),
+                _text_to_te_position(raw_value_masked_comments[:error_end_offset]),
+            ).relative_to(value_element_pos)
+
+            problem_range = lint_state.position_codec.range_to_client_units(
+                lint_state.lines,
+                te_range_to_lsp(problem_range_te),
+            )
+            if garbage_part is not None:
+                if _DEP_RELATION_CLAUSE.fullmatch(garbage_part) is not None:
+                    msg = (
+                        "Trailing data after a relationship that might be a second relationship."
+                        " Is a separator missing before this part?"
+                    )
+                else:
+                    msg = "Parse error of the relationship. Either a syntax error or a missing separator somewhere."
+                yield Diagnostic(
+                    lint_state.position_codec.range_to_client_units(
+                        lint_state.lines,
+                        problem_range,
+                    ),
+                    msg,
+                    DiagnosticSeverity.Error,
+                    source="debputy",
+                )
+            else:
+                dep = _cleanup_rel(
+                    raw_value_masked_comments[error_start_offset:error_end_offset]
+                )
+                yield Diagnostic(
+                    lint_state.position_codec.range_to_client_units(
+                        lint_state.lines,
+                        problem_range,
+                    ),
+                    f'Could not parse "{dep}" as a dependency relation.',
+                    DiagnosticSeverity.Error,
+                    source="debputy",
+                )
+
+
+def _rrr_build_driver_mismatch(
+    _known_field: "F",
+    _deb822_file: Deb822FileElement,
+    _kvpair: Deb822KeyValuePairElement,
+    kvpair_range_te: "TERange",
+    _field_name_range: "TERange",
+    stanza: Deb822ParagraphElement,
+    _stanza_position: "TEPosition",
+    lint_state: LintState,
+) -> Iterable[Diagnostic]:
+    dr = stanza.get("Build-Driver", "debian-rules")
+    if dr != "debian-rules":
+        yield Diagnostic(
+            lint_state.position_codec.range_to_client_units(
+                lint_state.lines,
+                te_range_to_lsp(kvpair_range_te),
+            ),
+            f"The Rules-Requires-Root field is irrelevant for the `Build-Driver` `{dr}`.",
+            DiagnosticSeverity.Warning,
+            source="debputy",
+            data=DiagnosticData(
+                quickfixes=[
+                    propose_remove_range_quick_fix(
+                        proposed_title="Remove Rules-Requires-Root"
+                    )
+                ]
+            ),
+        )
+
+
+class Dep5Matcher(BasenameGlobMatch):
+    def __init__(self, basename_glob: str) -> None:
+        super().__init__(
+            basename_glob,
+            only_when_in_directory=None,
+            path_type=None,
+            recursive_match=False,
+        )
+
+
+def _match_dep5_segment(
+    current_dir: VirtualPathBase, basename_glob: str
+) -> Iterable[VirtualPathBase]:
+    if "*" in basename_glob or "?" in basename_glob:
+        return Dep5Matcher(basename_glob).finditer(current_dir)
+    else:
+        res = current_dir.get(basename_glob)
+        if res is None:
+            return tuple()
+        return (res,)
+
+
+_RE_SLASHES = re.compile(r"//+")
+
+
+def _dep5_unnecessary_symbols(
+    value: str,
+    value_range: TERange,
+    lint_state: LintState,
+) -> Iterable[Diagnostic]:
+    slash_check_index = 0
+    if value.startswith(("./", "/")):
+        prefix_len = 1 if value[0] == "/" else 2
+        if value[prefix_len - 1 : prefix_len + 2].startswith("//"):
+            _, slashes_end = _RE_SLASHES.search(value).span()
+            prefix_len = slashes_end
+
+        slash_check_index = prefix_len
+        prefix_range = te_range_to_lsp(
+            TERange(
+                value_range.start_pos,
+                TEPosition(
+                    value_range.start_pos.line_position,
+                    value_range.start_pos.cursor_position + prefix_len,
+                ),
+            )
+        )
+        yield Diagnostic(
+            lint_state.position_codec.range_to_client_units(
+                lint_state.lines,
+                prefix_range,
+            ),
+            f'Unnecessary prefix "{value[0:prefix_len]}"',
+            DiagnosticSeverity.Warning,
+            source="debputy",
+            data=DiagnosticData(
+                quickfixes=[
+                    propose_remove_range_quick_fix(
+                        proposed_title=f'Delete "{value[0:prefix_len]}"'
+                    )
+                ]
+            ),
+        )
+
+    for m in _RE_SLASHES.finditer(value, slash_check_index):
+        m_start, m_end = m.span(0)
+
+        prefix_range = te_range_to_lsp(
+            TERange(
+                TEPosition(
+                    value_range.start_pos.line_position,
+                    value_range.start_pos.cursor_position + m_start,
+                ),
+                TEPosition(
+                    value_range.start_pos.line_position,
+                    value_range.start_pos.cursor_position + m_end,
+                ),
+            )
+        )
+        yield Diagnostic(
+            lint_state.position_codec.range_to_client_units(
+                lint_state.lines,
+                prefix_range,
+            ),
+            'Simplify to a single "/"',
+            DiagnosticSeverity.Warning,
+            source="debputy",
+            data=DiagnosticData(quickfixes=[propose_correct_text_quick_fix("/")]),
+        )
+
+
+def _dep5_files_check(
+    known_field: "F",
+    _deb822_file: Deb822FileElement,
+    kvpair: Deb822KeyValuePairElement,
+    kvpair_range_te: "TERange",
+    _field_name_range: "TERange",
+    _stanza: Deb822ParagraphElement,
+    _stanza_position: "TEPosition",
+    lint_state: LintState,
+) -> Iterable[Diagnostic]:
+    interpreter = known_field.field_value_class.interpreter()
+    assert interpreter is not None
+    full_value_range = kvpair.value_element.range_in_parent().relative_to(
+        kvpair_range_te.start_pos
+    )
+    values_with_ranges = []
+    for value_ref in kvpair.interpret_as(interpreter).iter_value_references():
+        value_range = value_ref.locatable.range_in_parent().relative_to(
+            full_value_range.start_pos
+        )
+        value = value_ref.value
+        values_with_ranges.append((value_ref.value, value_range))
+        yield from _dep5_unnecessary_symbols(value, value_range, lint_state)
+
+    source_root = lint_state.source_root
+    if source_root is None:
+        return
+    i = 0
+    limit = len(values_with_ranges)
+    while i < limit:
+        value, value_range = values_with_ranges[i]
+        i += 1
+
+
 def _combined_custom_field_check(*checks: CustomFieldCheck) -> CustomFieldCheck:
     def _validator(
         known_field: "F",
+        deb822_file: Deb822FileElement,
         kvpair: Deb822KeyValuePairElement,
-        field_range_te: "TERange",
+        kvpair_range_te: "TERange",
+        field_name_range_te: "TERange",
         stanza: Deb822ParagraphElement,
         stanza_position: "TEPosition",
-        position_codec: "LintCapablePositionCodec",
-        lines: List[str],
+        lint_state: LintState,
     ) -> Iterable[Diagnostic]:
         for check in checks:
             yield from check(
                 known_field,
+                deb822_file,
                 kvpair,
-                field_range_te,
+                kvpair_range_te,
+                field_name_range_te,
                 stanza,
                 stanza_position,
-                position_codec,
-                lines,
+                lint_state,
             )
 
     return _validator
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class PackageNameSectionRule:
+    section: str
+    check: Callable[[str], bool]
+
+
+def _package_name_section_rule(
+    section: str,
+    check: Union[Callable[[str], bool], re.Pattern],
+    *,
+    confirm_re: Optional[re.Pattern] = None,
+) -> PackageNameSectionRule:
+    if confirm_re is not None:
+        assert callable(check)
+
+        def _impl(v: str) -> bool:
+            return check(v) and confirm_re.search(v)
+
+    elif isinstance(check, re.Pattern):
+
+        def _impl(v: str) -> bool:
+            return check.search(v) is not None
+
+    else:
+        _impl = check
+
+    return PackageNameSectionRule(section, _impl)
+
+
+# rules: order is important (first match wins in case of a conflict)
+_PKGNAME_VS_SECTION_RULES = [
+    _package_name_section_rule("debian-installer", lambda n: n.endswith("-udeb")),
+    _package_name_section_rule("doc", lambda n: n.endswith(("-doc", "-docs"))),
+    _package_name_section_rule("debug", lambda n: n.endswith(("-dbg", "-dbgsym"))),
+    _package_name_section_rule(
+        "httpd",
+        lambda n: n.startswith(("lighttpd-mod", "libapache2-mod-", "libnginx-mod-")),
+    ),
+    _package_name_section_rule("gnustep", lambda n: n.startswith("gnustep-")),
+    _package_name_section_rule(
+        "gnustep",
+        lambda n: n.endswith(
+            (
+                ".framework",
+                ".framework-common",
+                ".tool",
+                ".tool-common",
+                ".app",
+                ".app-common",
+            )
+        ),
+    ),
+    _package_name_section_rule("embedded", lambda n: n.startswith("moblin-")),
+    _package_name_section_rule("javascript", lambda n: n.startswith("node-")),
+    _package_name_section_rule(
+        "zope",
+        lambda n: n.startswith(("python-zope", "python3-zope", "zope")),
+    ),
+    _package_name_section_rule(
+        "python",
+        lambda n: n.startswith(("python-", "python3-")),
+    ),
+    _package_name_section_rule(
+        "gnu-r",
+        lambda n: n.startswith(("r-cran-", "r-bioc-", "r-other-")),
+    ),
+    _package_name_section_rule("editors", lambda n: n.startswith("elpa-")),
+    _package_name_section_rule("lisp", lambda n: n.startswith("cl-")),
+    _package_name_section_rule(
+        "lisp",
+        lambda n: "-elisp-" in n or n.endswith("-elisp"),
+    ),
+    _package_name_section_rule(
+        "lisp",
+        lambda n: n.startswith("lib") and n.endswith("-guile"),
+    ),
+    _package_name_section_rule("lisp", lambda n: n.startswith("guile-")),
+    _package_name_section_rule("golang", lambda n: n.startswith("golang-")),
+    _package_name_section_rule(
+        "perl",
+        lambda n: n.startswith("lib") and n.endswith("-perl"),
+    ),
+    _package_name_section_rule(
+        "cli-mono",
+        lambda n: n.startswith("lib") and n.endswith(("-cil", "-cil-dev")),
+    ),
+    _package_name_section_rule(
+        "java",
+        lambda n: n.startswith("lib") and n.endswith(("-java", "-gcj", "-jni")),
+    ),
+    _package_name_section_rule(
+        "php",
+        lambda n: n.startswith(("libphp", "php")),
+        confirm_re=re.compile(r"^(?:lib)?php(?:\d(?:\.\d)?)?-"),
+    ),
+    _package_name_section_rule(
+        "php", lambda n: n.startswith("lib-") and n.endswith("-php")
+    ),
+    _package_name_section_rule(
+        "haskell",
+        lambda n: n.startswith(("haskell-", "libhugs-", "libghc-", "libghc6-")),
+    ),
+    _package_name_section_rule(
+        "ruby",
+        lambda n: "-ruby" in n,
+        confirm_re=re.compile(r"^lib.*-ruby(?:1\.\d)?$"),
+    ),
+    _package_name_section_rule("ruby", lambda n: n.startswith("ruby-")),
+    _package_name_section_rule(
+        "rust",
+        lambda n: n.startswith("librust-") and n.endswith("-dev"),
+    ),
+    _package_name_section_rule("rust", lambda n: n.startswith("rust-")),
+    _package_name_section_rule(
+        "ocaml",
+        lambda n: n.startswith("lib-") and n.endswith(("-ocaml-dev", "-camlp4-dev")),
+    ),
+    _package_name_section_rule("javascript", lambda n: n.startswith("libjs-")),
+    _package_name_section_rule(
+        "interpreters",
+        lambda n: n.startswith("lib-") and n.endswith(("-tcl", "-lua", "-gst")),
+    ),
+    _package_name_section_rule(
+        "introspection",
+        lambda n: n.startswith("gir-"),
+        confirm_re=re.compile(r"^gir\d+\.\d+-.*-\d+\.\d+$"),
+    ),
+    _package_name_section_rule(
+        "fonts",
+        lambda n: n.startswith(("xfonts-", "fonts-", "ttf-")),
+    ),
+    _package_name_section_rule("admin", lambda n: n.startswith(("libnss-", "libpam-"))),
+    _package_name_section_rule(
+        "localization",
+        lambda n: n.startswith(
+            (
+                "aspell-",
+                "hunspell-",
+                "myspell-",
+                "mythes-",
+                "dict-freedict-",
+                "gcompris-sound-",
+            )
+        ),
+    ),
+    _package_name_section_rule(
+        "localization",
+        lambda n: n.startswith("hyphen-"),
+        confirm_re=re.compile(r"^hyphen-[a-z]{2}(?:-[a-z]{2})?$"),
+    ),
+    _package_name_section_rule(
+        "localization",
+        lambda n: "-l10n-" in n or n.endswith("-l10n"),
+    ),
+    _package_name_section_rule("kernel", lambda n: n.endswith(("-dkms", "-firmware"))),
+    _package_name_section_rule(
+        "libdevel",
+        lambda n: n.startswith("lib") and n.endswith(("-dev", "-headers")),
+    ),
+    _package_name_section_rule(
+        "libs",
+        lambda n: n.startswith("lib"),
+        confirm_re=re.compile(r"^lib.*\d[ad]?$"),
+    ),
+]
+
+
+# Fiddling with the package name can cause a lot of changes (diagnostic scans), so we have an upper bound
+# on the cache. The number is currently just taken out of a hat.
+@functools.lru_cache(64)
+def package_name_to_section(name: str) -> Optional[str]:
+    for rule in _PKGNAME_VS_SECTION_RULES:
+        if rule.check(name):
+            return rule.section
+    return None
 
 
 class FieldValueClass(Enum):
@@ -513,9 +1406,9 @@ class FieldValueClass(Enum):
     COMMA_SEPARATED_EMAIL_LIST = auto(), LIST_UPLOADERS_INTERPRETATION
     COMMA_OR_SPACE_SEPARATED_LIST = auto(), LIST_COMMA_OR_SPACE_SEPARATED_INTERPRETATION
     FREE_TEXT_FIELD = auto(), None
-    DEP5_FILE_LIST = auto(), None  # TODO
+    DEP5_FILE_LIST = auto(), LIST_SPACE_SEPARATED_INTERPRETATION
 
-    def interpreter(self) -> Optional[Interpretation[Any]]:
+    def interpreter(self) -> Optional[Interpretation[Deb822ParsedTokenList[Any, Any]]]:
         return self.value[1]
 
 
@@ -563,6 +1456,36 @@ def _unknown_value_check(
     return known_value, message, severity, fix_data
 
 
+def _dep5_escape_path(path: str) -> str:
+    return path.replace(" ", "?")
+
+
+def _noop_escape_path(path: str) -> str:
+    return path
+
+
+def _should_ignore_dir(
+    path: VirtualPath,
+    *,
+    supports_dir_match: bool = False,
+    match_non_persistent_paths: bool = False,
+) -> bool:
+    if not supports_dir_match and not any(path.iterdir):
+        return True
+    cachedir_tag = path.get("CACHEDIR.TAG")
+    if (
+        not match_non_persistent_paths
+        and cachedir_tag is not None
+        and cachedir_tag.is_file
+    ):
+        # https://bford.info/cachedir/
+        with cachedir_tag.open(byte_io=True, buffering=64) as fd:
+            start = fd.read(43)
+        if start == b"Signature: 8a477f597d28d172789f06886806bc55":
+            return True
+    return False
+
+
 @dataclasses.dataclass(slots=True, frozen=True)
 class Deb822KnownField:
     name: str
@@ -576,63 +1499,290 @@ class Deb822KnownField:
     unknown_value_diagnostic_severity: Optional[DiagnosticSeverity] = (
         DiagnosticSeverity.Error
     )
+    # One-line description for space-constrained docs (such as completion docs)
+    synopsis_doc: Optional[str] = None
+    usage_hint: Optional[UsageHint] = None
     hover_text: Optional[str] = None
     spellcheck_value: bool = False
     is_stanza_name: bool = False
     is_single_value_field: bool = True
     custom_field_check: Optional[CustomFieldCheck] = None
+    can_complete_field_in_stanza: Optional[
+        Callable[[Iterable[Deb822ParagraphElement]], bool]
+    ] = None
+
+    def _can_complete_field_in_stanza(
+        self,
+        stanza_parts: Sequence[Deb822ParagraphElement],
+    ) -> bool:
+        return (
+            self.can_complete_field_in_stanza is None
+            or self.can_complete_field_in_stanza(stanza_parts)
+        )
+
+    def complete_field(
+        self,
+        lint_state: LintState,
+        stanza_parts: Sequence[Deb822ParagraphElement],
+        markdown_kind: MarkupKind,
+    ) -> Optional[CompletionItem]:
+        if not self._can_complete_field_in_stanza(stanza_parts):
+            return None
+        name = self.name
+        complete_as = name + ": "
+        options = self.value_options_for_completer(
+            lint_state,
+            stanza_parts,
+            "",
+            markdown_kind,
+            is_completion_for_field=True,
+        )
+        if options is not None and len(options) == 1:
+            value = options[0].insert_text
+            if value is not None:
+                complete_as += value
+        tags = []
+        is_deprecated = False
+        if self.replaced_by or self.deprecated_with_no_replacement:
+            is_deprecated = True
+            tags.append(CompletionItemTag.Deprecated)
+
+        doc = self.hover_text
+        if doc:
+            doc = MarkupContent(
+                value=doc,
+                kind=markdown_kind,
+            )
+        else:
+            doc = None
+
+        return CompletionItem(
+            name,
+            insert_text=complete_as,
+            deprecated=is_deprecated,
+            tags=tags,
+            detail=format_comp_item_synopsis_doc(
+                self.usage_hint,
+                self.synopsis_doc,
+                is_deprecated,
+            ),
+            documentation=doc,
+        )
+
+    def _complete_files(
+        self,
+        base_dir: Optional[VirtualPathBase],
+        value_being_completed: str,
+        *,
+        is_dep5_file_list: bool = False,
+        supports_dir_match: bool = False,
+        supports_spaces_in_filename: bool = False,
+        match_non_persistent_paths: bool = False,
+    ) -> Optional[Sequence[CompletionItem]]:
+        _info(f"_complete_files: {base_dir.fs_path} - {value_being_completed!r}")
+        if base_dir is None or not base_dir.is_dir:
+            return None
+
+        if is_dep5_file_list:
+            supports_spaces_in_filename = True
+            supports_dir_match = False
+            match_non_persistent_paths = False
+
+        if value_being_completed == "":
+            current_dir = base_dir
+            unmatched_parts: Sequence[str] = ()
+        else:
+            current_dir, unmatched_parts = base_dir.attempt_lookup(
+                value_being_completed
+            )
+
+        if len(unmatched_parts) > 1:
+            # Unknown directory part / glob, and we currently do not deal with that.
+            return None
+        if len(unmatched_parts) == 1 and unmatched_parts[0] == "*":
+            # Avoid convincing the client to remove the star (seen with emacs)
+            return None
+        items = []
+
+        path_escaper = _dep5_escape_path if is_dep5_file_list else _noop_escape_path
+
+        for child in current_dir.iterdir:
+            if child.is_symlink and is_dep5_file_list:
+                continue
+            if not supports_spaces_in_filename and (
+                " " in child.name or "\t" in child.name
+            ):
+                continue
+            sort_text = (
+                f"z-{child.name}" if child.name.startswith(".") else f"a-{child.name}"
+            )
+            if child.is_dir:
+                if _should_ignore_dir(
+                    child,
+                    supports_dir_match=supports_dir_match,
+                    match_non_persistent_paths=match_non_persistent_paths,
+                ):
+                    continue
+                items.append(
+                    CompletionItem(
+                        f"{child.path}/",
+                        label_details=CompletionItemLabelDetails(
+                            description=child.path,
+                        ),
+                        insert_text=path_escaper(f"{child.path}/"),
+                        filter_text=f"{child.path}/",
+                        sort_text=sort_text,
+                        kind=CompletionItemKind.Folder,
+                    )
+                )
+            else:
+                items.append(
+                    CompletionItem(
+                        child.path,
+                        label_details=CompletionItemLabelDetails(
+                            description=child.path,
+                        ),
+                        insert_text=path_escaper(child.path),
+                        filter_text=child.path,
+                        sort_text=sort_text,
+                        kind=CompletionItemKind.File,
+                    )
+                )
+        return items
+
+    def value_options_for_completer(
+        self,
+        lint_state: LintState,
+        stanza_parts: Sequence[Deb822ParagraphElement],
+        value_being_completed: str,
+        markdown_kind: MarkupKind,
+        *,
+        is_completion_for_field: bool = False,
+    ) -> Optional[Sequence[CompletionItem]]:
+        known_values = self.known_values
+        if self.field_value_class == FieldValueClass.DEP5_FILE_LIST:
+            if is_completion_for_field:
+                return None
+            return self._complete_files(
+                lint_state.source_root,
+                value_being_completed,
+                is_dep5_file_list=True,
+            )
+
+        if known_values is None:
+            return None
+        if is_completion_for_field and (
+            len(known_values) == 1
+            or (
+                len(known_values) == 2
+                and self.warn_if_default
+                and self.default_value is not None
+            )
+        ):
+            value = next(
+                iter(v for v in self.known_values if v != self.default_value),
+                None,
+            )
+            if value is None:
+                return None
+            return [CompletionItem(value, insert_text=value)]
+        return [
+            CompletionItem(
+                keyword.value,
+                insert_text=keyword.value,
+                sort_text=keyword.sort_text,
+                detail=format_comp_item_synopsis_doc(
+                    keyword.usage_hint,
+                    keyword.synopsis_doc,
+                    keyword.is_deprecated,
+                ),
+                deprecated=keyword.is_deprecated,
+                tags=[CompletionItemTag.Deprecated] if keyword.is_deprecated else None,
+                documentation=(
+                    MarkupContent(value=keyword.hover_text, kind=markdown_kind)
+                    if keyword.hover_text
+                    else None
+                ),
+            )
+            for keyword in known_values.values()
+            if keyword.is_keyword_valid_completion_in_stanza(stanza_parts)
+        ]
+
+    def field_omitted_diagnostics(
+        self,
+        deb822_file: Deb822FileElement,
+        representation_field_range: Range,
+        stanza: Deb822ParagraphElement,
+        stanza_position: "TEPosition",
+        header_stanza: Optional[Deb822FileElement],
+        lint_state: LintState,
+    ) -> Iterable[Diagnostic]:
+        missing_field_severity = self.missing_field_severity
+        if missing_field_severity is None:
+            return
+
+        yield Diagnostic(
+            representation_field_range,
+            f"Stanza is missing field {self.name}",
+            severity=missing_field_severity,
+            source="debputy",
+        )
 
     def field_diagnostics(
         self,
+        deb822_file: Deb822FileElement,
         kvpair: Deb822KeyValuePairElement,
         stanza: Deb822ParagraphElement,
         stanza_position: "TEPosition",
-        position_codec: "LintCapablePositionCodec",
-        lines: List[str],
+        kvpair_range_te: "TERange",
+        lint_state: LintState,
         *,
         field_name_typo_reported: bool = False,
     ) -> Iterable[Diagnostic]:
         field_name_token = kvpair.field_token
-        field_range_te = kvpair.range_in_parent().relative_to(stanza_position)
-        field_position_te = field_range_te.start_pos
+        field_name_range_te = kvpair.field_token.range_in_parent().relative_to(
+            kvpair_range_te.start_pos
+        )
         yield from self._diagnostics_for_field_name(
             field_name_token,
-            field_position_te,
+            field_name_range_te,
             field_name_typo_reported,
-            position_codec,
-            lines,
+            lint_state,
         )
         if self.custom_field_check is not None:
             yield from self.custom_field_check(
                 self,
+                deb822_file,
                 kvpair,
-                field_range_te,
+                kvpair_range_te,
+                field_name_range_te,
                 stanza,
                 stanza_position,
-                position_codec,
-                lines,
+                lint_state,
             )
+        yield from self._dep5_file_list_diagnostics(
+            kvpair, kvpair_range_te.start_pos, lint_state
+        )
         if not self.spellcheck_value:
             yield from self._known_value_diagnostics(
-                kvpair, field_position_te, position_codec, lines
+                kvpair,
+                kvpair_range_te.start_pos,
+                lint_state,
             )
 
     def _diagnostics_for_field_name(
         self,
         token: Deb822FieldNameToken,
-        token_position: "TEPosition",
+        token_range: "TERange",
         typo_detected: bool,
-        position_codec: "LintCapablePositionCodec",
-        lines: List[str],
+        lint_state: LintState,
     ) -> Iterable[Diagnostic]:
         field_name = token.text
         # Defeat the case-insensitivity from python-debian
         field_name_cased = str(field_name)
-        token_range_server_units = te_range_to_lsp(
-            TERange.from_position_and_size(token_position, token.size())
-        )
-        token_range = position_codec.range_to_client_units(
-            lines,
+        token_range_server_units = te_range_to_lsp(token_range)
+        token_range = lint_state.position_codec.range_to_client_units(
+            lint_state.lines,
             token_range_server_units,
         )
         if self.deprecated_with_no_replacement:
@@ -642,7 +1792,7 @@ class Deb822KnownField:
                 severity=DiagnosticSeverity.Warning,
                 source="debputy",
                 tags=[DiagnosticTag.Deprecated],
-                data=propose_remove_line_quick_fix(),
+                data=DiagnosticData(quickfixes=[propose_remove_line_quick_fix()]),
             )
         elif self.replaced_by is not None:
             yield Diagnostic(
@@ -651,7 +1801,9 @@ class Deb822KnownField:
                 severity=DiagnosticSeverity.Warning,
                 source="debputy",
                 tags=[DiagnosticTag.Deprecated],
-                data=propose_correct_text_quick_fix(self.replaced_by),
+                data=DiagnosticData(
+                    quickfixes=[propose_correct_text_quick_fix(self.replaced_by)],
+                ),
             )
 
         if not typo_detected and field_name_cased != self.name:
@@ -660,25 +1812,101 @@ class Deb822KnownField:
                 f"Non-canonical spelling of {self.name}",
                 severity=DiagnosticSeverity.Information,
                 source="debputy",
-                data=propose_correct_text_quick_fix(self.name),
+                data=DiagnosticData(
+                    quickfixes=[propose_correct_text_quick_fix(self.name)]
+                ),
             )
+
+    def _dep5_file_list_diagnostics(
+        self,
+        kvpair: Deb822KeyValuePairElement,
+        kvpair_position: "TEPosition",
+        lint_state: LintState,
+    ) -> Iterable[Diagnostic]:
+        source_root = lint_state.source_root
+        if (
+            self.field_value_class != FieldValueClass.DEP5_FILE_LIST
+            or source_root is None
+        ):
+            return
+        interpreter = self.field_value_class.interpreter()
+        values = kvpair.interpret_as(interpreter)
+        value_off = kvpair.value_element.position_in_parent().relative_to(
+            kvpair_position
+        )
+
+        assert interpreter is not None
+
+        for token in values.iter_parts():
+            if token.is_whitespace:
+                continue
+            text = token.convert_to_text()
+            if "?" in text or "*" in text:
+                # TODO: We should validate these as well
+                continue
+            matched_path, missing_part = source_root.attempt_lookup(text)
+            # It is common practice to delete "dirty" files during clean. This causes files listed
+            # in `debian/copyright` to go missing and as a consequence, we do not validate whether
+            # they are present (that would require us to check the `.orig.tar`, which we could but
+            # do not have the infrastructure for).
+            if not missing_part and matched_path.is_dir:
+                path_range_te = token.range_in_parent().relative_to(value_off)
+                path_range = lint_state.position_codec.range_to_client_units(
+                    lint_state.lines,
+                    te_range_to_lsp(path_range_te),
+                )
+                yield Diagnostic(
+                    path_range,
+                    "Directories cannot be a match. Use `dir/*` to match everything in it",
+                    severity=DiagnosticSeverity.Warning,
+                    source="debputy",
+                    data=DiagnosticData(
+                        quickfixes=[
+                            propose_correct_text_quick_fix(f"{matched_path.path}/*")
+                        ]
+                    ),
+                )
 
     def _known_value_diagnostics(
         self,
         kvpair: Deb822KeyValuePairElement,
-        field_position_te: "TEPosition",
-        position_codec: "LintCapablePositionCodec",
-        lines: List[str],
+        kvpair_position: "TEPosition",
+        lint_state: LintState,
     ) -> Iterable[Diagnostic]:
         unknown_value_severity = self.unknown_value_diagnostic_severity
-        allowed_values = self.known_values
         interpreter = self.field_value_class.interpreter()
-        if not allowed_values or interpreter is None:
+        if interpreter is None:
             return
         values = kvpair.interpret_as(interpreter)
         value_off = kvpair.value_element.position_in_parent().relative_to(
-            field_position_te
+            kvpair_position
         )
+
+        last_token_non_ws_sep_token: Optional[TE] = None
+        for token in values.iter_parts():
+            if token.is_whitespace:
+                continue
+            if not token.is_separator:
+                last_token_non_ws_sep_token = None
+                continue
+            if last_token_non_ws_sep_token is not None:
+                sep_range_te = token.range_in_parent().relative_to(value_off)
+                value_range = lint_state.position_codec.range_to_client_units(
+                    lint_state.lines,
+                    te_range_to_lsp(sep_range_te),
+                )
+                yield Diagnostic(
+                    value_range,
+                    "Duplicate separator",
+                    severity=DiagnosticSeverity.Error,
+                    source="debputy",
+                )
+            last_token_non_ws_sep_token = token
+
+        allowed_values = self.known_values
+        if not allowed_values:
+            return
+
         first_value = None
         first_exclusive_value_ref = None
         first_exclusive_value = None
@@ -691,14 +1919,10 @@ class Deb822KnownField:
                 and self.field_value_class == FieldValueClass.SINGLE_VALUE
             ):
                 value_loc = value_ref.locatable
-                value_position_te = value_loc.position_in_parent().relative_to(
-                    value_off
-                )
-                value_range_in_server_units = te_range_to_lsp(
-                    TERange.from_position_and_size(value_position_te, value_loc.size())
-                )
-                value_range = position_codec.range_to_client_units(
-                    lines,
+                range_position_te = value_loc.range_in_parent().relative_to(value_off)
+                value_range_in_server_units = te_range_to_lsp(range_position_te)
+                value_range = lint_state.position_codec.range_to_client_units(
+                    lint_state.lines,
                     value_range_in_server_units,
                 )
                 yield Diagnostic(
@@ -715,8 +1939,8 @@ class Deb822KnownField:
                 value_loc = first_exclusive_value_ref.locatable
                 value_range_te = value_loc.range_in_parent().relative_to(value_off)
                 value_range_in_server_units = te_range_to_lsp(value_range_te)
-                value_range = position_codec.range_to_client_units(
-                    lines,
+                value_range = lint_state.position_codec.range_to_client_units(
+                    lint_state.lines,
                     value_range_in_server_units,
                 )
                 yield Diagnostic(
@@ -760,7 +1984,7 @@ class Deb822KnownField:
                         "message": unknown_value_message,
                         "severity": unknown_severity,
                         "source": "debputy",
-                        "data": typo_fix_data,
+                        "data": DiagnosticData(quickfixes=typo_fix_data),
                     }
                 )
 
@@ -783,7 +2007,7 @@ class Deb822KnownField:
                         "message": obsolete_value_message,
                         "severity": obsolete_severity,
                         "source": "debputy",
-                        "data": obsolete_fix_data,
+                        "data": DiagnosticData(quickfixes=obsolete_fix_data),
                     }
                 )
 
@@ -793,16 +2017,227 @@ class Deb822KnownField:
             value_loc = value_ref.locatable
             value_range_te = value_loc.range_in_parent().relative_to(value_off)
             value_range_in_server_units = te_range_to_lsp(value_range_te)
-            value_range = position_codec.range_to_client_units(
-                lines,
+            value_range = lint_state.position_codec.range_to_client_units(
+                lint_state.lines,
                 value_range_in_server_units,
             )
             yield from (Diagnostic(value_range, **issue_data) for issue_data in issues)
 
+    def reformat_field(
+        self,
+        effective_preference: "EffectiveFormattingPreference",
+        stanza_range: TERange,
+        kvpair: Deb822KeyValuePairElement,
+        formatter: FormatterCallback,
+        position_codec: LintCapablePositionCodec,
+        lines: List[str],
+    ) -> Iterable[TextEdit]:
+        kvpair_range = kvpair.range_in_parent().relative_to(stanza_range.start_pos)
+        return trim_end_of_line_whitespace(
+            position_codec,
+            lines,
+            line_range=range(
+                kvpair_range.start_pos.line_position,
+                kvpair_range.end_pos.line_position,
+            ),
+        )
+
 
 @dataclasses.dataclass(slots=True, frozen=True)
-class DctrlKnownField(Deb822KnownField):
+class DctrlLikeKnownField(Deb822KnownField):
+
+    def reformat_field(
+        self,
+        effective_preference: "EffectiveFormattingPreference",
+        stanza_range: TERange,
+        kvpair: Deb822KeyValuePairElement,
+        formatter: FormatterCallback,
+        position_codec: LintCapablePositionCodec,
+        lines: List[str],
+    ) -> Iterable[TextEdit]:
+        interpretation = self.field_value_class.interpreter()
+        if (
+            not effective_preference.deb822_normalize_field_content
+            or interpretation is None
+        ):
+            yield from super(DctrlLikeKnownField, self).reformat_field(
+                effective_preference,
+                stanza_range,
+                kvpair,
+                formatter,
+                position_codec,
+                lines,
+            )
+            return
+        if not self.reformattable_field:
+            yield from super(DctrlLikeKnownField, self).reformat_field(
+                effective_preference,
+                stanza_range,
+                kvpair,
+                formatter,
+                position_codec,
+                lines,
+            )
+            return
+        seen: Set[str] = set()
+        old_kvpair_range = kvpair.range_in_parent()
+        sort = self.is_sortable_field
+
+        # Avoid the context manager as we do not want to perform the change (it would contaminate future ranges)
+        field_content = kvpair.interpret_as(interpretation)
+        old_value = field_content.convert_to_text(with_field_name=True)
+        for package_ref in field_content.iter_value_references():
+            value = package_ref.value
+            if self.is_relationship_field:
+                new_value = " | ".join(x.strip() for x in value.split("|"))
+            else:
+                new_value = value
+            if not sort or new_value not in seen:
+                if new_value != value:
+                    package_ref.value = new_value
+                seen.add(new_value)
+            else:
+                package_ref.remove()
+            if sort:
+                field_content.sort(key=_sort_packages_key)
+            field_content.value_formatter(formatter)
+            field_content.reformat_when_finished()
+
+        new_value = field_content.convert_to_text(with_field_name=True)
+        if new_value != old_value:
+            range_server_units = te_range_to_lsp(
+                old_kvpair_range.relative_to(stanza_range.start_pos)
+            )
+            yield TextEdit(
+                position_codec.range_to_client_units(lines, range_server_units),
+                new_value,
+            )
+
+    @property
+    def reformattable_field(self) -> bool:
+        return self.is_relationship_field or self.is_sortable_field
+
+    @property
+    def is_relationship_field(self) -> bool:
+        return False
+
+    @property
+    def is_sortable_field(self) -> bool:
+        return self.is_relationship_field
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class DTestsCtrlKnownField(DctrlLikeKnownField):
+    @property
+    def is_relationship_field(self) -> bool:
+        return self.name == "Depends"
+
+    @property
+    def is_sortable_field(self) -> bool:
+        return self.is_relationship_field or self.name in (
+            "Features",
+            "Restrictions",
+            "Tests",
+        )
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class DctrlKnownField(DctrlLikeKnownField):
     inherits_from_source: bool = False
+
+    def field_omitted_diagnostics(
+        self,
+        deb822_file: Deb822FileElement,
+        representation_field_range: Range,
+        stanza: Deb822ParagraphElement,
+        stanza_position: "TEPosition",
+        header_stanza: Optional[Deb822FileElement],
+        lint_state: LintState,
+    ) -> Iterable[Diagnostic]:
+        missing_field_severity = self.missing_field_severity
+        if missing_field_severity is None:
+            return
+
+        if (
+            self.inherits_from_source
+            and header_stanza is not None
+            and self.name in header_stanza
+        ):
+            return
+
+        if self.name == "Standards-Version":
+            stanzas = list(deb822_file)[1:]
+            if all(s.get("Package-Type") == "udeb" for s in stanzas):
+                return
+
+        yield Diagnostic(
+            representation_field_range,
+            f"Stanza is missing field {self.name}",
+            severity=missing_field_severity,
+            source="debputy",
+        )
+
+    def reformat_field(
+        self,
+        effective_preference: "EffectiveFormattingPreference",
+        stanza_range: TERange,
+        kvpair: Deb822KeyValuePairElement,
+        formatter: FormatterCallback,
+        position_codec: LintCapablePositionCodec,
+        lines: List[str],
+    ) -> Iterable[TextEdit]:
+        if (
+            self.name == "Architecture"
+            and effective_preference.deb822_normalize_field_content
+        ):
+            interpretation = self.field_value_class.interpreter()
+            assert interpretation is not None
+            archs = list(kvpair.interpret_as(interpretation))
+            # Sort, with wildcard entries (such as linux-any) first:
+            archs = sorted(archs, key=lambda x: ("any" not in x, x))
+            new_value = f"{kvpair.field_name}: {' '.join(archs)}\n"
+            if new_value != kvpair.convert_to_text():
+                kvpair_range = te_range_to_lsp(
+                    kvpair.range_in_parent().relative_to(stanza_range.start_pos)
+                )
+                return [
+                    TextEdit(
+                        position_codec.range_to_client_units(lines, kvpair_range),
+                        new_value,
+                    )
+                ]
+            return tuple()
+
+        return super(DctrlKnownField, self).reformat_field(
+            effective_preference,
+            stanza_range,
+            kvpair,
+            formatter,
+            position_codec,
+            lines,
+        )
+
+    @property
+    def is_relationship_field(self) -> bool:
+        name_lc = self.name.lower()
+        return (
+            name_lc in all_package_relationship_fields()
+            or name_lc in all_source_relationship_fields()
+        )
+
+    @property
+    def reformattable_field(self) -> bool:
+        return self.is_relationship_field or self.name == "Uploaders"
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class DctrlRelationshipKnownField(DctrlKnownField):
+    allowed_version_operators: FrozenSet[str] = frozenset()
+    supports_or_relation: bool = True
+
+    @property
+    def is_relationship_field(self) -> bool:
+        return True
 
 
 SOURCE_FIELDS = _fields(
@@ -812,6 +2247,7 @@ SOURCE_FIELDS = _fields(
         custom_field_check=_each_value_match_regex_validation(PKGNAME_REGEX),
         missing_field_severity=DiagnosticSeverity.Error,
         is_stanza_name=True,
+        synopsis_doc="Name of source package",
         hover_text=textwrap.dedent(
             """\
             Declares the name of the source package.
@@ -823,7 +2259,10 @@ SOURCE_FIELDS = _fields(
     DctrlKnownField(
         "Standards-Version",
         FieldValueClass.SINGLE_VALUE,
+        # Conditionally mandatory (special-cased by field_omitted_diagnostics)
         missing_field_severity=DiagnosticSeverity.Error,
+        custom_field_check=_sv_field_validation,
+        synopsis_doc="Debian Policy version this package complies with",
         hover_text=textwrap.dedent(
             """\
                   Declares the last semantic version of the Debian Policy this package as last checked against.
@@ -843,6 +2282,7 @@ SOURCE_FIELDS = _fields(
         FieldValueClass.SINGLE_VALUE,
         known_values=ALL_SECTIONS,
         unknown_value_diagnostic_severity=DiagnosticSeverity.Warning,
+        synopsis_doc="Default section",
         hover_text=textwrap.dedent(
             """\
                 Define the default section for packages in this source package.
@@ -862,6 +2302,7 @@ SOURCE_FIELDS = _fields(
         default_value="optional",
         warn_if_default=False,
         known_values=ALL_PRIORITIES,
+        synopsis_doc="Default priority",
         hover_text=textwrap.dedent(
             """\
                     Define the default priority for packages in this source package.
@@ -881,6 +2322,7 @@ SOURCE_FIELDS = _fields(
         "Maintainer",
         FieldValueClass.SINGLE_VALUE,
         missing_field_severity=DiagnosticSeverity.Error,
+        synopsis_doc="Name and email of maintainer / maintenance team",
         hover_text=textwrap.dedent(
             """\
                   The maintainer of the package.
@@ -897,6 +2339,7 @@ SOURCE_FIELDS = _fields(
     DctrlKnownField(
         "Uploaders",
         FieldValueClass.COMMA_SEPARATED_EMAIL_LIST,
+        synopsis_doc="Names and emails of co-maintainers",
         hover_text=textwrap.dedent(
             """\
                   Comma separated list of uploaders associated with the package.
@@ -920,8 +2363,50 @@ SOURCE_FIELDS = _fields(
         ),
     ),
     DctrlKnownField(
+        "Build-Driver",
+        FieldValueClass.SINGLE_VALUE,
+        default_value="debian-rules",
+        known_values=allowed_values(
+            Keyword(
+                "debian-rules",
+                synopsis_doc="Build via `debian/rules`",
+                hover_text=textwrap.dedent(
+                    """\
+                    Use the `debian/rules` interface for building packages.
+
+                    This is the historical default and the interface that Debian Packages have used for
+                    decades to build debs.
+            """
+                ),
+            ),
+            Keyword(
+                "debputy",
+                synopsis_doc="Build with `debputy`",
+                hover_text=textwrap.dedent(
+                    """\
+                    Use the `debputy` interface for building the package.
+
+                    This is provides the "full" integration mode with `debputy` where all parts of the
+                    package build is handled by `debputy`.
+
+                    This *may* make any `debhelper` build-dependency redundant depending on which build
+                    system is used. Some build systems (such as `autoconf` still use `debhelper` based tools).
+            """
+                ),
+            ),
+        ),
+        synopsis_doc="Which implementation dpkg should use for the build",
+        hover_text=textwrap.dedent(
+            """\
+                The name of the build driver that dpkg (`dpkg-buildpackage`) will use for assembling the
+                package.
+            """
+        ),
+    ),
+    DctrlKnownField(
         "Vcs-Browser",
         FieldValueClass.SINGLE_VALUE,
+        synopsis_doc="URL for browsers to interact with packaging VCS",
         hover_text=textwrap.dedent(
             """\
                 URL to the Version control system repo used for the packaging. The URL should be usable with a
@@ -934,6 +2419,7 @@ SOURCE_FIELDS = _fields(
     DctrlKnownField(
         "Vcs-Git",
         FieldValueClass.SPACE_SEPARATED_LIST,
+        synopsis_doc="URL and options for cloning the packaging VCS",
         hover_text=textwrap.dedent(
             """\
                 URL to the git repo used for the packaging. The URL should be usable with `git clone`
@@ -952,6 +2438,7 @@ SOURCE_FIELDS = _fields(
     DctrlKnownField(
         "Vcs-Svn",
         FieldValueClass.SPACE_SEPARATED_LIST,  # TODO: Might be a single value
+        synopsis_doc="URL for checking out the packaging VCS",
         hover_text=textwrap.dedent(
             """\
                 URL to the git repo used for the packaging. The URL should be usable with `svn checkout`
@@ -965,6 +2452,7 @@ SOURCE_FIELDS = _fields(
     DctrlKnownField(
         "Vcs-Arch",
         FieldValueClass.SPACE_SEPARATED_LIST,  # TODO: Might be a single value
+        synopsis_doc="URL for checking out the packaging VCS",
         hover_text=textwrap.dedent(
             """\
                 URL to the git repo used for the packaging. The URL should be usable for getting a copy of the
@@ -977,6 +2465,7 @@ SOURCE_FIELDS = _fields(
     DctrlKnownField(
         "Vcs-Cvs",
         FieldValueClass.SPACE_SEPARATED_LIST,  # TODO: Might be a single value
+        synopsis_doc="URL for checking out the packaging VCS",
         hover_text=textwrap.dedent(
             """\
                 URL to the git repo used for the packaging. The URL should be usable for getting a copy of the
@@ -989,6 +2478,7 @@ SOURCE_FIELDS = _fields(
     DctrlKnownField(
         "Vcs-Darcs",
         FieldValueClass.SPACE_SEPARATED_LIST,  # TODO: Might be a single value
+        synopsis_doc="URL for checking out the packaging VCS",
         hover_text=textwrap.dedent(
             """\
                 URL to the git repo used for the packaging. The URL should be usable for getting a copy of the
@@ -1001,6 +2491,7 @@ SOURCE_FIELDS = _fields(
     DctrlKnownField(
         "Vcs-Hg",
         FieldValueClass.SPACE_SEPARATED_LIST,  # TODO: Might be a single value
+        synopsis_doc="URL for checking out the packaging VCS",
         hover_text=textwrap.dedent(
             """\
                 URL to the git repo used for the packaging. The URL should be usable for getting a copy of the
@@ -1013,6 +2504,7 @@ SOURCE_FIELDS = _fields(
     DctrlKnownField(
         "Vcs-Mtn",
         FieldValueClass.SPACE_SEPARATED_LIST,  # TODO: Might be a single value
+        synopsis_doc="URL for checking out the packaging VCS",
         hover_text=textwrap.dedent(
             """\
                 URL to the git repo used for the packaging. The URL should be usable for getting a copy of the
@@ -1027,7 +2519,8 @@ SOURCE_FIELDS = _fields(
         FieldValueClass.SINGLE_VALUE,
         deprecated_with_no_replacement=True,
         default_value="no",
-        known_values=_allowed_values("yes", "no"),
+        known_values=allowed_values("yes", "no"),
+        synopsis_doc="Old ACL mechanism for Debian Maintainers",
         hover_text=textwrap.dedent(
             """\
                 Obsolete field
@@ -1044,6 +2537,8 @@ SOURCE_FIELDS = _fields(
     DctrlKnownField(
         "Build-Depends",
         FieldValueClass.COMMA_SEPARATED_LIST,
+        custom_field_check=_dctrl_validate_dep,
+        synopsis_doc="Dependencies requires for clean and full build actions",
         hover_text=textwrap.dedent(
             """\
                    All minimum build-dependencies for this source package. Needed for any target including **clean**.
@@ -1053,6 +2548,8 @@ SOURCE_FIELDS = _fields(
     DctrlKnownField(
         "Build-Depends-Arch",
         FieldValueClass.COMMA_SEPARATED_LIST,
+        custom_field_check=_dctrl_validate_dep,
+        synopsis_doc="Dependencies requires for arch:any action (build-arch/binary-arch)",
         hover_text=textwrap.dedent(
             """\
                 Build-dependencies required for building the architecture dependent binary packages of this source
@@ -1068,6 +2565,8 @@ SOURCE_FIELDS = _fields(
     DctrlKnownField(
         "Build-Depends-Indep",
         FieldValueClass.COMMA_SEPARATED_LIST,
+        custom_field_check=_dctrl_validate_dep,
+        synopsis_doc="Dependencies requires for arch:all action (build-indep/binary-indep)",
         hover_text=textwrap.dedent(
             """\
                 Build-dependencies required for building the architecture independent binary packages of this source
@@ -1080,9 +2579,12 @@ SOURCE_FIELDS = _fields(
        """
         ),
     ),
-    DctrlKnownField(
+    DctrlRelationshipKnownField(
         "Build-Conflicts",
         FieldValueClass.COMMA_SEPARATED_LIST,
+        supports_or_relation=False,
+        custom_field_check=_dctrl_validate_dep,
+        synopsis_doc="Package versions that will break the build or the clean target (use sparingly)",
         hover_text=textwrap.dedent(
             """\
                 Packages that must **not** be installed during **any** part of the build, including the **clean**
@@ -1094,9 +2596,12 @@ SOURCE_FIELDS = _fields(
        """
         ),
     ),
-    DctrlKnownField(
+    DctrlRelationshipKnownField(
         "Build-Conflicts-Arch",
         FieldValueClass.COMMA_SEPARATED_LIST,
+        supports_or_relation=False,
+        custom_field_check=_dctrl_validate_dep,
+        synopsis_doc="Package versions that will break an arch:any build (use sparingly)",
         hover_text=textwrap.dedent(
             """\
                 Packages that must **not** be installed during the **build-arch** or **binary-arch** targets.
@@ -1108,9 +2613,12 @@ SOURCE_FIELDS = _fields(
        """
         ),
     ),
-    DctrlKnownField(
+    DctrlRelationshipKnownField(
         "Build-Conflicts-Indep",
         FieldValueClass.COMMA_SEPARATED_LIST,
+        supports_or_relation=False,
+        custom_field_check=_dctrl_validate_dep,
+        synopsis_doc="Package versions that will break an arch:all build (use sparingly)",
         hover_text=textwrap.dedent(
             """\
                 Packages that must **not** be installed during the **build-indep** or **binary-indep** targets.
@@ -1125,6 +2633,7 @@ SOURCE_FIELDS = _fields(
     DctrlKnownField(
         "Testsuite",
         FieldValueClass.SPACE_SEPARATED_LIST,
+        synopsis_doc="Announce **autodep8** tests",
         hover_text=textwrap.dedent(
             """\
                 Declares that this package provides or should run install time tests via `autopkgtest`.
@@ -1142,6 +2651,7 @@ SOURCE_FIELDS = _fields(
     DctrlKnownField(
         "Homepage",
         FieldValueClass.SINGLE_VALUE,
+        synopsis_doc="Upstream homepage",
         hover_text=textwrap.dedent(
             """\
                 Link to the upstream homepage for this source package.
@@ -1157,7 +2667,8 @@ SOURCE_FIELDS = _fields(
         "Rules-Requires-Root",
         FieldValueClass.SPACE_SEPARATED_LIST,
         unknown_value_diagnostic_severity=None,
-        known_values=_allowed_values(
+        custom_field_check=_rrr_build_driver_mismatch,
+        known_values=allowed_values(
             Keyword(
                 "no",
                 is_exclusive=True,
@@ -1196,6 +2707,7 @@ SOURCE_FIELDS = _fields(
                 ),
             ),
         ),
+        synopsis_doc="Declare (fake)root requirements for the package",
         hover_text=textwrap.dedent(
             """\
                 Declare if and when the package build assumes it is run as root or fakeroot.
@@ -1218,6 +2730,9 @@ SOURCE_FIELDS = _fields(
                 ` Build-Depends` on `dpkg-build-api (>= 1)` or later, the default is `no`. Otherwise,
                 the default is `binary-target`
 
+                This field is only relevant when when the `Build-Driver` is `debian-rules` (which it is by
+                default).
+
                 Note it is **not** possible to require running the package as "true root".
             """
         ),
@@ -1225,6 +2740,7 @@ SOURCE_FIELDS = _fields(
     DctrlKnownField(
         "Bugs",
         FieldValueClass.SINGLE_VALUE,
+        synopsis_doc="Custom bugtracker URL (for third-party packages)",
         hover_text=textwrap.dedent(
             """\
             Provide a custom bug tracker URL
@@ -1238,6 +2754,7 @@ SOURCE_FIELDS = _fields(
     DctrlKnownField(
         "Origin",
         FieldValueClass.SINGLE_VALUE,
+        synopsis_doc="Custom origin (for third-party packages)",
         hover_text=textwrap.dedent(
             """\
             Declare the origin of the package.
@@ -1252,6 +2769,7 @@ SOURCE_FIELDS = _fields(
         "X-Python-Version",
         FieldValueClass.COMMA_SEPARATED_LIST,
         replaced_by="X-Python3-Version",
+        synopsis_doc="Supported Python2 versions (`dh-python` specific)",
         hover_text=textwrap.dedent(
             """\
             Obsolete field for declaring the supported Python2 versions
@@ -1264,6 +2782,7 @@ SOURCE_FIELDS = _fields(
     DctrlKnownField(
         "X-Python3-Version",
         FieldValueClass.COMMA_SEPARATED_LIST,
+        synopsis_doc="Supported Python3 versions (`dh-python` specific)",
         hover_text=textwrap.dedent(
             # Too lazy to provide a better description
             """\
@@ -1277,7 +2796,9 @@ SOURCE_FIELDS = _fields(
     DctrlKnownField(
         "XS-Autobuild",
         FieldValueClass.SINGLE_VALUE,
-        known_values=_allowed_values("yes"),
+        known_values=allowed_values("yes"),
+        synopsis_doc="Whether this non-free is auto-buildable on buildds",
+        # TODO: Needs logic for reading source section: can_complete_field_in_stanza=_complete_only_for_non_free_pkgs,
         hover_text=textwrap.dedent(
             """\
             Used for non-free packages to denote that they may be auto-build on the Debian build infrastructure
@@ -1288,9 +2809,43 @@ SOURCE_FIELDS = _fields(
         ),
     ),
     DctrlKnownField(
+        "X-Style",
+        FieldValueClass.SINGLE_VALUE,
+        known_values=ALL_PUBLIC_NAMED_STYLES,
+        unknown_value_diagnostic_severity=DiagnosticSeverity.Warning,
+        synopsis_doc="Choose a formatting style",
+        hover_text=textwrap.dedent(
+            """\
+        This field is read by `debputy` to determine how it should format the files in the package.
+
+        In its absence, `debputy` will attempt to determine the formatting style by looking at
+        the maintainers and built-in style preferences.
+
+        This value influences commands such as `debputy reformat` and `debputy lsp server`. When this
+        field is present, it will overrule any built-in style detection that `debputy` would otherwise
+        have applied.
+
+        Note that unknown styles will cause the styling to be disabled (and trigger a `debputy lint`
+        warning).
+        """
+        ),
+    ),
+    DctrlKnownField(
+        "XS-Ruby-Versions",
+        FieldValueClass.FREE_TEXT_FIELD,
+        deprecated_with_no_replacement=True,
+        synopsis_doc="Obsolete",
+        hover_text=textwrap.dedent(
+            """\
+        Obsolete according to https://bugs.debian.org/1075762
+        """
+        ),
+    ),
+    DctrlKnownField(
         "Description",
         FieldValueClass.FREE_TEXT_FIELD,
         spellcheck_value=True,
+        synopsis_doc="Common base description for all packages via substvar",
         hover_text=textwrap.dedent(
             """\
             This field contains a human-readable description of the package. However, it is not used directly.
@@ -1343,19 +2898,21 @@ BINARY_FIELDS = _fields(
         custom_field_check=_each_value_match_regex_validation(PKGNAME_REGEX),
         is_stanza_name=True,
         missing_field_severity=DiagnosticSeverity.Error,
+        synopsis_doc="Declares the name of a binary package",
         hover_text="Declares the name of a binary package",
     ),
     DctrlKnownField(
         "Package-Type",
         FieldValueClass.SINGLE_VALUE,
         default_value="deb",
-        known_values=_allowed_values(
+        known_values=allowed_values(
             Keyword("deb", hover_text="The package will be built as a regular deb."),
             Keyword(
                 "udeb",
                 hover_text="The package will be built as a micro-deb (also known as a udeb).  These are solely used by the debian-installer.",
             ),
         ),
+        synopsis_doc="Non-standard package type (such as `udeb`)",
         hover_text=textwrap.dedent(
             """\
                 **Special-purpose only**. *This field is a special purpose field and is rarely needed.*
@@ -1372,7 +2929,9 @@ BINARY_FIELDS = _fields(
         FieldValueClass.SPACE_SEPARATED_LIST,
         missing_field_severity=DiagnosticSeverity.Error,
         unknown_value_diagnostic_severity=None,
-        known_values=_allowed_values(*dpkg_arch_and_wildcards()),
+        # FIXME: Specialize validation for architecture ("!foo" is not a "typo" and should have a better warning)
+        known_values=allowed_values(*dpkg_arch_and_wildcards()),
+        synopsis_doc="Architecture of the package",
         hover_text=textwrap.dedent(
             """\
                 Determines which architectures this package can be compiled for or if it is an architecture-independent
@@ -1406,7 +2965,7 @@ BINARY_FIELDS = _fields(
         "Essential",
         FieldValueClass.SINGLE_VALUE,
         default_value="no",
-        known_values=_allowed_values(
+        known_values=allowed_values(
             Keyword(
                 "yes",
                 hover_text="The package is essential and uninstalling it will completely and utterly break the"
@@ -1424,6 +2983,7 @@ BINARY_FIELDS = _fields(
                 ),
             ),
         ),
+        synopsis_doc="Whether the package is essential (Policy term)",
         hover_text=textwrap.dedent(
             """\
                 **Special-purpose only**. *This field is a special purpose field and is rarely needed.*
@@ -1437,10 +2997,10 @@ BINARY_FIELDS = _fields(
                    (APT and dpkg) will refuse to uninstall it without some very insisting force options and warnings.
 
                  * Other packages are not required to declare explicit dependencies on essential packages as a
-                   side-effect of the above except as to ensure a that the given essential package is upgraded
+                   side-effect of the above except as to ensure that the given essential package is upgraded
                    to a given minimum version.
 
-                 * Once installed, essential packages function must at all time no matter where dpkg is in its
+                 * Once installed, essential packages must function at all times no matter where dpkg is in its
                    installation or upgrade process. During bootstrapping or installation, this requirement is
                    relaxed.
             """
@@ -1451,7 +3011,8 @@ BINARY_FIELDS = _fields(
         FieldValueClass.SINGLE_VALUE,
         replaced_by="Protected",
         default_value="no",
-        known_values=_allowed_values(
+        synopsis_doc="**Deprecated**: Use Protected instead",
+        known_values=allowed_values(
             Keyword(
                 "yes",
                 hover_text="The package is protected and attempts to uninstall it will cause strong warnings to the"
@@ -1469,12 +3030,19 @@ BINARY_FIELDS = _fields(
                 ),
             ),
         ),
+        hover_text=textwrap.dedent(
+            """\
+            This is the prototype field that lead to `Protected`, which should be used instead.
+
+            It makes `apt` (but not `dpkg`) require extra confirmation before removing the package.
+        """
+        ),
     ),
     DctrlKnownField(
         "Protected",
         FieldValueClass.SINGLE_VALUE,
         default_value="no",
-        known_values=_allowed_values(
+        known_values=allowed_values(
             Keyword(
                 "yes",
                 hover_text="The package is protected and attempts to uninstall it will cause strong warnings to the"
@@ -1492,10 +3060,24 @@ BINARY_FIELDS = _fields(
                 ),
             ),
         ),
+        synopsis_doc="Mark as protected (uninstall protection)",
+        hover_text=textwrap.dedent(
+            """\
+            Declare this package as a potential system critical package. When set to `yes`, both `apt`
+            and `dpkg` will assume that removing the package *may* break the system. As a consequence,
+            they will require extra confirmation (or "force" options) before removing the package.
+
+            This field basically provides a "uninstall" protection similar to that of `Essential` packages
+            without the other benefits and requirements that comes with `Essential` packages. This option
+            is generally applicable to packages like bootloaders, kernels, and other packages that might
+            be necessary for booting the system.
+        """
+        ),
     ),
     DctrlKnownField(
         "Pre-Depends",
         FieldValueClass.COMMA_SEPARATED_LIST,
+        synopsis_doc="Very strong dependencies; prefer Depends when applicable",
         hover_text=textwrap.dedent(
             """\
               **Advanced field**. *This field covers an advanced topic.  If you are new to packaging, you are*
@@ -1522,6 +3104,8 @@ BINARY_FIELDS = _fields(
     DctrlKnownField(
         "Depends",
         FieldValueClass.COMMA_SEPARATED_LIST,
+        custom_field_check=_dctrl_validate_dep,
+        synopsis_doc="Dependencies required to install and use this package",
         hover_text=textwrap.dedent(
             """\
               Lists the packages that must be installed, before this package is installed.
@@ -1550,6 +3134,8 @@ BINARY_FIELDS = _fields(
     DctrlKnownField(
         "Recommends",
         FieldValueClass.COMMA_SEPARATED_LIST,
+        custom_field_check=_dctrl_validate_dep,
+        synopsis_doc="Optional dependencies **most** people should have",
         hover_text=textwrap.dedent(
             """\
                 Lists the packages that *should* be installed when this package is installed in all but
@@ -1573,6 +3159,8 @@ BINARY_FIELDS = _fields(
     DctrlKnownField(
         "Suggests",
         FieldValueClass.COMMA_SEPARATED_LIST,
+        custom_field_check=_dctrl_validate_dep,
+        synopsis_doc="Optional dependencies that some people might want",
         hover_text=textwrap.dedent(
             """\
                 Lists the packages that may make this package more useful but not installing them is perfectly
@@ -1589,6 +3177,8 @@ BINARY_FIELDS = _fields(
     DctrlKnownField(
         "Enhances",
         FieldValueClass.COMMA_SEPARATED_LIST,
+        custom_field_check=_dctrl_validate_dep,
+        synopsis_doc="Packages enhanced by installing this package",
         hover_text=textwrap.dedent(
             """\
                 This field is similar to Suggests but works in the opposite direction.  It is used to declare that
@@ -1597,15 +3187,19 @@ BINARY_FIELDS = _fields(
                 **Example**:
                 ```
                 Package: foo
-                Provide: debputy-plugin-foo
+                Provides: debputy-plugin-foo
                 Enhances: debputy
                 ```
             """
         ),
     ),
-    DctrlKnownField(
+    DctrlRelationshipKnownField(
         "Provides",
         FieldValueClass.COMMA_SEPARATED_LIST,
+        custom_field_check=_dctrl_validate_dep,
+        supports_or_relation=False,
+        allowed_version_operators=frozenset(["="]),
+        synopsis_doc="Additional packages/versions this package dependency-wise satisfy",
         hover_text=textwrap.dedent(
             """\
                   Declare this package also provide one or more other packages.  This means that this package can
@@ -1645,9 +3239,12 @@ BINARY_FIELDS = _fields(
             """
         ),
     ),
-    DctrlKnownField(
+    DctrlRelationshipKnownField(
         "Conflicts",
         FieldValueClass.COMMA_SEPARATED_LIST,
+        custom_field_check=_dctrl_validate_dep,
+        supports_or_relation=False,
+        synopsis_doc="Packages that this package is not co-installable with",
         hover_text=textwrap.dedent(
             """\
                   **Warning**: *You may be looking for Breaks instead of Conflicts*.
@@ -1661,20 +3258,24 @@ BINARY_FIELDS = _fields(
                   Conflicts: bar
                   ```
 
-                  Please check the description of the **Breaks** field for when you would use **Breaks** vs.
-                  **Conflicts**.
+                  Please see https://wiki.debian.org/PackageTransition for when to uses **Breaks**, **Conflicts**,
+                  or/and **Replaces**.
 
                   Note if a package conflicts with itself (indirectly or via **Provides**), then it is using a
                   special rule for **Conflicts**.  See section
-                  7.6.2 "[Replacing whole packages, forcing their removal]" in the Debian Policy Manual.
+                  7.6.2 "[Replacing whole packages, forcing their removal]" in the Debian Policy Manual for the
+                  details.
 
                   [Replacing whole packages, forcing their removal]: https://www.debian.org/doc/debian-policy/ch-relationships.html#replacing-whole-packages-forcing-their-removal
             """
         ),
     ),
-    DctrlKnownField(
+    DctrlRelationshipKnownField(
         "Breaks",
         FieldValueClass.COMMA_SEPARATED_LIST,
+        custom_field_check=_dctrl_validate_dep,
+        supports_or_relation=False,
+        synopsis_doc="Package/versions that does not work with this package",
         hover_text=textwrap.dedent(
             """\
       This package cannot be installed together with the packages listed in the `Breaks` field.
@@ -1688,43 +3289,26 @@ BINARY_FIELDS = _fields(
       Breaks: bar (<= 1.0~)
       ````
 
-      **Breaks vs. Conflicts**:
+      Please see https://wiki.debian.org/PackageTransition for when to uses **Breaks**, **Conflicts**, or/and
+      **Replaces**.
 
-       * I moved files from **foo** to **bar** in version X, what should I do?
-
-         Add `Breaks: foo (<< X~)` + `Replaces: foo (<< X~)` to **bar**
-
-       * Upgrading **bar** while **foo** is version X or less causes problems **foo** or **bar** to break.
-         How do I solve this?
-
-         Add `Breaks: foo (<< X~)` to **bar**
-
-       * The **foo** and **bar** packages provide the same functionality (interface) but different
-         implementations and there can be at most one of them. What should I do?
-
-         See section 7.6.2 [Replacing whole packages, forcing their removal] in the Debian Policy Manual.
-
-       * How to handle when **foo** and **bar** packages are unrelated but happen to provide the same binary?
-
-         Attempt to resolve the name conflict by renaming the clashing files in question on either (or both) sides.
-
-      Note the use of *~* in version numbers in the answers are generally used to ensure this works correctly in
+      Note the use of *~* in version numbers in the example is used to ensure this works correctly in
       case of a backports (in the Debian archive), where the package is rebuilt with the "~bpo" suffix in its
       version.
-
-      [Replacing whole packages, forcing their removal]: https://www.debian.org/doc/debian-policy/ch-relationships.html#replacing-whole-packages-forcing-their-removal
             """
         ),
     ),
-    DctrlKnownField(
+    DctrlRelationshipKnownField(
         "Replaces",
         FieldValueClass.COMMA_SEPARATED_LIST,
+        custom_field_check=_dctrl_validate_dep,
+        synopsis_doc="This package replaces content from these packages/versions",
         hover_text=textwrap.dedent(
             """\
                   This package either replaces another package or overwrites files that used to be provided by
                   another package.
 
-                  **Attention**: The `Replaces` field is **always** used with either `Breaks` or `Conflicts` field.
+                  **Attention**: The `Replaces` field should **always** used with either `Breaks` or `Conflicts` field.
 
                   **Example**:
                   ```
@@ -1737,21 +3321,26 @@ BINARY_FIELDS = _fields(
                   Breaks: foo (<< 1.2-3~)
                   ```
 
-                  Please check the description of the `Breaks` field for when you would use `Breaks` vs. `Conflicts`.
-                  It also covers common uses of `Replaces`.
+                  Please see https://wiki.debian.org/PackageTransition for when to uses **Breaks**, **Conflicts**,
+                  or/and **Replaces**.
+
+                  Note the use of *~* in version numbers in the example is used to ensure this works correctly in
+                  case of a backports (in the Debian archive), where the package is rebuilt with the "~bpo" suffix in its
+                  version.
             """
         ),
     ),
     DctrlKnownField(
         "Build-Profiles",
         FieldValueClass.BUILD_PROFILES_LIST,
+        synopsis_doc="Conditionally build this package",
         hover_text=textwrap.dedent(
             """\
       **Advanced field**. *This field covers an advanced topic. If you are new to packaging, you are*
       *advised to leave it at its default until you have a working basic package or lots of time to understand*
       *this topic.*
 
-      Declare that the package will only built when the given build-profiles are satisfied.
+      Declare that the package will only be built when the given build-profiles are satisfied.
 
       This field is primarily used in combination with build profiles inside the build dependency related fields
       to reduce the number of build dependencies required during bootstrapping of a new architecture.
@@ -1780,6 +3369,7 @@ BINARY_FIELDS = _fields(
         inherits_from_source=True,
         known_values=ALL_SECTIONS,
         unknown_value_diagnostic_severity=DiagnosticSeverity.Warning,
+        synopsis_doc="Which section this package should be in",
         hover_text=textwrap.dedent(
             """\
                 Define the section for this package.
@@ -1801,6 +3391,7 @@ BINARY_FIELDS = _fields(
         missing_field_severity=DiagnosticSeverity.Error,
         inherits_from_source=True,
         known_values=ALL_PRIORITIES,
+        synopsis_doc="The package's priority (Policy term)",
         hover_text=textwrap.dedent(
             """\
                     Define the priority this package.
@@ -1824,9 +3415,12 @@ BINARY_FIELDS = _fields(
         warn_if_default=False,
         default_value="no",
         custom_field_check=_dctrl_ma_field_validation,
-        known_values=_allowed_values(
+        known_values=allowed_values(
             Keyword(
                 "no",
+                # Show `no` after `foreign` and `same`. Often, you want `same` or `foreign`.
+                sort_text="zz-no",
+                synopsis_doc='No Multi-Arch support (often used for "reviewed and no support possible/needed")',
                 hover_text=textwrap.dedent(
                     """\
                     The default. The package can be installed for at most one architecture at the time.  It can
@@ -1842,6 +3436,7 @@ BINARY_FIELDS = _fields(
             ),
             Keyword(
                 "foreign",
+                synopsis_doc="Can satisfy dependencies for other architectures (common for data and *some* scripts)",
                 hover_text=textwrap.dedent(
                     """\
                     The package can be installed for at most one architecture at the time.  However, it can
@@ -1859,6 +3454,8 @@ BINARY_FIELDS = _fields(
             ),
             Keyword(
                 "same",
+                can_complete_keyword_in_stanza=_complete_only_in_arch_dep_pkgs,
+                synopsis_doc="Co-installable with itself for different architectures (common for native libraries)",
                 hover_text=textwrap.dedent(
                     """\
                     The same version of the package can be co-installed for multiple architecture. However,
@@ -1874,10 +3471,20 @@ BINARY_FIELDS = _fields(
             ),
             Keyword(
                 "allowed",
+                # Never show `allowed` first, it is the absolute least likely candidate.
+                sort_text="zzzz-allowed",
+                usage_hint="rare",
+                synopsis_doc="Consumer decides whether it is `same` and `foreign`",
                 hover_text=textwrap.dedent(
                     """\
-                  **Advanced value**.  The package is *not* co-installable with itself but can satisfy Multi-Arch
-                  foreign and Multi-Arch same relations at the same.  This is useful for implementations of
+                  **Advanced and very rare value**. This value is exceedingly rare to the point that less
+                  than 0.40% of all packages in Debian used in it (May 2024). It is even rarer for for
+                  `Architecture: all` packages, where the number an order of magnitude smaller. Unless
+                  a Multi-Arch expert or the Multi-Arch hinter suggested that you use this value, for
+                  this package, then probably it is not the right choice.
+
+                  The value means that the package is *not* co-installable with itself but can satisfy Multi-Arch
+                  `foreign` and Multi-Arch `same` relations at the same time.  This is useful for implementations of
                   scripting languages (such as Perl or Python).  Here the interpreter contextually need to
                   satisfy some relations as `Multi-Arch: foreign` and others as `Multi-Arch: same`.
 
@@ -1892,6 +3499,7 @@ BINARY_FIELDS = _fields(
                 ),
             ),
         ),
+        synopsis_doc="**Advanced field**: How this package interacts with multi arch",
         hover_text=textwrap.dedent(
             """\
       **Advanced field**. *This field covers an advanced topic. If you are new to packaging, you are*
@@ -1921,7 +3529,9 @@ BINARY_FIELDS = _fields(
 
        * If you have an architecture dependent package, where everything is installed in
          `/usr/lib/${DEB_HOST_MULTIARCH}` (plus a bit of standard documentation in `/usr/share/doc`), then
-         you *probably* want `Multi-Arch: same`
+         you *probably* want `Multi-Arch: same`. Note that when using `debputy` as the build helper, `debputy`
+         will automatically detect the most common variants of this case and sets the field for you when
+          relevant.
 
        * If none of the above applies, then omit the field unless you know what you are doing or you are
          receiving advice from a Multi-Arch expert.
@@ -1947,11 +3557,11 @@ BINARY_FIELDS = _fields(
           solely providing data or binaries that have "Multi-Arch neutral interfaces". Sadly, describing
           a "Multi-Arch neutral interface" is hard and often only done by Multi-Arch experts on a case-by-case
           basis. Among other, scripts despite being the same on all architectures can still have a "non-neutral"
-          "Multi-Arch" interface if their output is architecture dependent or if they dependencies force them
+          "Multi-Arch" interface if their output is architecture dependent or if their dependencies force them
           out of the `foreign` role. The dependency issue usually happens when depending indirectly on an
           `Multi-Arch: allowed` package.
 
-          Some programs are have "Multi-Arch dependent interfaces" and are not safe to declare as
+          Some programs have "Multi-Arch dependent interfaces" and are not safe to declare as
           `Multi-Arch: foreign`. The name `foreign` refers to the fact that the package can satisfy relations
           for native *and foreign* architectures at the same time.
 
@@ -1968,7 +3578,7 @@ BINARY_FIELDS = _fields(
           Note: This value **cannot** be used with `Architecture: all`.
 
 
-        * `allowed` - **Advanced value**. This value is for a complex use-case that most people does not
+        * `allowed` - **Advanced value**. This value is for a complex use-case that most people do not
           need. Consider it only if none of the other values seem to do the trick.
 
           The package is **NOT** co-installable with itself but can satisfy Multi-Arch foreign and Multi-Arch same
@@ -1997,10 +3607,12 @@ BINARY_FIELDS = _fields(
     DctrlKnownField(
         "XB-Installer-Menu-Item",
         FieldValueClass.SINGLE_VALUE,
+        can_complete_field_in_stanza=_complete_only_for_udeb_pkgs,
         custom_field_check=_combined_custom_field_check(
             _udeb_only_field_validation,
             _each_value_match_regex_validation(re.compile(r"^[1-9]\d{3,4}$")),
         ),
+        synopsis_doc="(udeb-only) Package's order in the d-i menu",
         hover_text=textwrap.dedent(
             """\
             This field is only relevant for `udeb` packages (debian-installer).
@@ -2023,8 +3635,9 @@ BINARY_FIELDS = _fields(
         "X-DH-Build-For-Type",
         FieldValueClass.SINGLE_VALUE,
         custom_field_check=_arch_not_all_only_field_validation,
+        can_complete_field_in_stanza=_complete_only_in_arch_dep_pkgs,
         default_value="host",
-        known_values=_allowed_values(
+        known_values=allowed_values(
             Keyword(
                 "host",
                 hover_text="The package should be compiled for `DEB_HOST_TARGET` (the default).",
@@ -2034,6 +3647,7 @@ BINARY_FIELDS = _fields(
                 hover_text="The package should be compiled for `DEB_TARGET_ARCH`.",
             ),
         ),
+        synopsis_doc="(Special purpose) For cross-compiling cross-compilers",
         hover_text=textwrap.dedent(
             """\
                   **Special-purpose only**. *This field is a special purpose field and is rarely needed.*
@@ -2063,7 +3677,12 @@ BINARY_FIELDS = _fields(
     DctrlKnownField(
         "X-Time64-Compat",
         FieldValueClass.SINGLE_VALUE,
-        custom_field_check=_each_value_match_regex_validation(PKGNAME_REGEX),
+        can_complete_field_in_stanza=_complete_only_in_arch_dep_pkgs,
+        custom_field_check=_combined_custom_field_check(
+            _each_value_match_regex_validation(PKGNAME_REGEX),
+            _arch_not_all_only_field_validation,
+        ),
+        synopsis_doc="(Special purpose) Compat name for time64_t transition",
         hover_text=textwrap.dedent(
             """\
                 Special purpose field related to the 64-bit time transition.
@@ -2071,12 +3690,15 @@ BINARY_FIELDS = _fields(
                 It is used to inform packaging helpers what the original (non-transitioned) package name
                 was when the auto-detection is inadequate. The non-transitioned package name is then
                 conditionally provided in the `${t64:Provides}` substitution variable.
+
+                The field only works for architecture dependent packages.
                 """
         ),
     ),
     DctrlKnownField(
         "Homepage",
         FieldValueClass.SINGLE_VALUE,
+        synopsis_doc="(Special purpose) Upstream homepage URL for this binary package",
         hover_text=textwrap.dedent(
             """\
                 Link to the upstream homepage for this binary package.
@@ -2095,6 +3717,8 @@ BINARY_FIELDS = _fields(
         spellcheck_value=True,
         # It will build just fine. But no one will know what it is for, so it probably won't be installed
         missing_field_severity=DiagnosticSeverity.Warning,
+        synopsis_doc="Package synopsis and description",
+        custom_field_check=dctrl_description_validator,
         hover_text=textwrap.dedent(
             """\
             A human-readable description of the package. This field consists of two related but distinct parts.
@@ -2140,6 +3764,7 @@ BINARY_FIELDS = _fields(
         "XB-Cnf-Visible-Pkgname",
         FieldValueClass.SINGLE_VALUE,
         custom_field_check=_each_value_match_regex_validation(PKGNAME_REGEX),
+        synopsis_doc="(Special purpose) Hint for `command-not-found`",
         hover_text=textwrap.dedent(
             """\
             **Special-case field**: *This field is only useful in very special circumstances.*
@@ -2168,6 +3793,7 @@ BINARY_FIELDS = _fields(
     DctrlKnownField(
         "X-DhRuby-Root",
         FieldValueClass.SINGLE_VALUE,
+        synopsis_doc="For multi-binary layout with `dh_ruby`",
         hover_text=textwrap.dedent(
             """\
             Used by `dh_ruby` to request "multi-binary" layout and where the root for the given
@@ -2177,6 +3803,17 @@ BINARY_FIELDS = _fields(
 
             <https://manpages.debian.org/dh_ruby>
             """
+        ),
+    ),
+    DctrlKnownField(
+        "XB-Ruby-Versions",
+        FieldValueClass.FREE_TEXT_FIELD,
+        deprecated_with_no_replacement=True,
+        synopsis_doc="Obsolete",
+        hover_text=textwrap.dedent(
+            """\
+        Obsolete according to https://bugs.debian.org/1075762
+        """
         ),
     ),
 )
@@ -2361,12 +3998,64 @@ _DEP5_HEADER_FIELDS = _fields(
         """
         ),
     ),
+    Deb822KnownField(
+        "Files-Excluded",
+        FieldValueClass.FREE_TEXT_FIELD,
+        hover_text=textwrap.dedent(
+            """\
+        Remove the listed files from the tarball when repacking (commonly via uscan). This can be useful when the
+        listed files are non-free but not necessary for the Debian package. In this case, the upstream version of
+        the package should generally end with `~dfsg` or `+dfsg` (to mark the content changed due to the
+        Debian Free Software Guidelines). The exclusion can also be useful to remove large files or directories
+        that are not used by Debian or pre-built binaries. In this case, `~ds` or `+ds` should be added to the
+        version instead of `~dfsg` or `+dfsg` for "Debian Source" to mark it as altered by Debian. If both reasons
+        are used, the `~dfsg` or `+dfsg` version is used as that is the more important reason for the repacking.
+
+        Example:
+        ```
+        Files-Excluded: exclude-this
+          exclude-dir
+          */exclude-dir
+          .*
+          */js/jquery.js
+        ```
+
+        The `Files-Included` field can be used to "re-include" files matched by `Files-Excluded`.
+
+        It is also possible to exclude files in specific "upstream components" for source packages with multiple
+        upstream tarballs. This is done by adding a field called `Files-Excluded-<component>`. The `<component>`
+        part should then match the component name exactly (case sensitive).
+
+        Defined by: mk-origtargz (usually used via uscan)
+        """
+        ),
+    ),
+    Deb822KnownField(
+        "Files-Included",
+        FieldValueClass.FREE_TEXT_FIELD,
+        hover_text=textwrap.dedent(
+            """\
+        Re-include files that were marked for exclusion by `Files-Excluded`. This can be useful for "exclude
+        everything except X" style semantics where `Files-Excluded` has a very broad pattern and
+        `Files-Included` then marks a few exceptions.
+
+        It is also possible to re-include files in specific "upstream components" for source packages with multiple
+        upstream tarballs. This is done by adding a field called `Files-Include-<component>` which is then used
+        in tandem with `Files-Exclude-<component>`. The `<component>` part should then match the component name
+        exactly (case sensitive).
+
+
+        Defined by: mk-origtargz (usually used via uscan)
+        """
+        ),
+    ),
 )
 _DEP5_FILES_FIELDS = _fields(
     Deb822KnownField(
         "Files",
         FieldValueClass.DEP5_FILE_LIST,
         is_stanza_name=True,
+        custom_field_check=_dep5_files_check,
         missing_field_severity=DiagnosticSeverity.Error,
         hover_text=textwrap.dedent(
             """\
@@ -2619,11 +4308,13 @@ _DEP5_LICENSE_FIELDS = _fields(
 )
 
 _DTESTSCTRL_FIELDS = _fields(
-    Deb822KnownField(
+    DTestsCtrlKnownField(
         "Architecture",
         FieldValueClass.SPACE_SEPARATED_LIST,
         unknown_value_diagnostic_severity=None,
-        known_values=_allowed_values(*dpkg_arch_and_wildcards()),
+        # FIXME: Specialize validation for architecture ("!fou" to "foo" would be bad)
+        known_values=allowed_values(*dpkg_arch_and_wildcards(allow_negations=True)),
+        synopsis_doc="Only run these tests on specific architectures",
         hover_text=textwrap.dedent(
             """\
             When package tests are only supported on a limited set of
@@ -2638,9 +4329,10 @@ _DTESTSCTRL_FIELDS = _fields(
         """
         ),
     ),
-    Deb822KnownField(
+    DTestsCtrlKnownField(
         "Classes",
         FieldValueClass.FREE_TEXT_FIELD,
+        synopsis_doc="Hardware related tagging",
         hover_text=textwrap.dedent(
             """\
             Most package tests should work in a minimal environment and are
@@ -2659,11 +4351,13 @@ _DTESTSCTRL_FIELDS = _fields(
         """
         ),
     ),
-    Deb822KnownField(
+    DTestsCtrlKnownField(
         "Depends",
         FieldValueClass.COMMA_SEPARATED_LIST,
         default_value="@",
-        hover_text="""\
+        synopsis_doc="Dependencies for running the tests",
+        hover_text=textwrap.dedent(
+            """\
             Declares that the specified packages must be installed for the test
             to go ahead. This supports all features of dpkg dependencies, including
             the architecture qualifiers (see
@@ -2696,9 +4390,10 @@ _DTESTSCTRL_FIELDS = _fields(
             the source tree's Build-Dependencies are *not* necessarily
             installed, and if you specify any Depends, no binary packages from
             the source are installed unless explicitly requested.
-        """,
+        """
+        ),
     ),
-    Deb822KnownField(
+    DTestsCtrlKnownField(
         "Features",
         FieldValueClass.COMMA_OR_SPACE_SEPARATED_LIST,
         hover_text=textwrap.dedent(
@@ -2711,11 +4406,11 @@ _DTESTSCTRL_FIELDS = _fields(
         """
         ),
     ),
-    Deb822KnownField(
+    DTestsCtrlKnownField(
         "Restrictions",
         FieldValueClass.COMMA_OR_SPACE_SEPARATED_LIST,
         unknown_value_diagnostic_severity=DiagnosticSeverity.Warning,
-        known_values=_allowed_values(
+        known_values=allowed_values(
             Keyword(
                 "allow-stderr",
                 hover_text=textwrap.dedent(
@@ -3019,6 +4714,7 @@ _DTESTSCTRL_FIELDS = _fields(
                 ),
             ),
         ),
+        synopsis_doc="Test restrictions and requirements",
         hover_text=textwrap.dedent(
             """\
             Declares some restrictions or problems with the tests defined in
@@ -3032,9 +4728,10 @@ _DTESTSCTRL_FIELDS = _fields(
         """
         ),
     ),
-    Deb822KnownField(
+    DTestsCtrlKnownField(
         "Tests",
         FieldValueClass.COMMA_OR_SPACE_SEPARATED_LIST,
+        synopsis_doc="List of test scripts to run",
         hover_text=textwrap.dedent(
             """\
             This field names the tests which are defined by this stanza, and map
@@ -3048,9 +4745,10 @@ _DTESTSCTRL_FIELDS = _fields(
         """
         ),
     ),
-    Deb822KnownField(
+    DTestsCtrlKnownField(
         "Test-Command",
         FieldValueClass.FREE_TEXT_FIELD,
+        synopsis_doc="Single test command",
         hover_text=textwrap.dedent(
             """\
             If your test only contains a shell command or two, or you want to
@@ -3066,9 +4764,11 @@ _DTESTSCTRL_FIELDS = _fields(
         """
         ),
     ),
-    Deb822KnownField(
+    DTestsCtrlKnownField(
         "Test-Directory",
         FieldValueClass.FREE_TEXT_FIELD,  # TODO: Single path
+        default_value="debian/tests",
+        synopsis_doc="The directory containing the tests listed in from `Tests`",
         hover_text=textwrap.dedent(
             """\
             Replaces the path segment `debian/tests` in the filenames of the
@@ -3108,6 +4808,28 @@ class StanzaMetadata(Mapping[str, F], Generic[F], ABC):
     def __iter__(self):
         return iter(self.stanza_fields.keys())
 
+    def reformat_stanza(
+        self,
+        effective_preference: "EffectiveFormattingPreference",
+        stanza: Deb822ParagraphElement,
+        stanza_range: TERange,
+        formatter: FormatterCallback,
+        position_codec: LintCapablePositionCodec,
+        lines: List[str],
+    ) -> Iterable[TextEdit]:
+        for known_field in self.stanza_fields.values():
+            kvpair = stanza.get_kvpair_element((known_field.name, 0), use_get=True)
+            if kvpair is None:
+                continue
+            yield from known_field.reformat_field(
+                effective_preference,
+                stanza_range,
+                kvpair,
+                formatter,
+                position_codec,
+                lines,
+            )
+
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class Dep5StanzaMetadata(StanzaMetadata[Deb822KnownField]):
@@ -3131,7 +4853,7 @@ class DctrlStanzaMetadata(StanzaMetadata[DctrlKnownField]):
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
-class DTestsCtrlStanzaMetadata(StanzaMetadata[Deb822KnownField]):
+class DTestsCtrlStanzaMetadata(StanzaMetadata[DTestsCtrlKnownField]):
 
     def stanza_diagnostics(
         self,
@@ -3166,6 +4888,40 @@ class Deb822FileMetadata(Generic[S]):
         except KeyError:
             return None
 
+    def reformat(
+        self,
+        effective_preference: "EffectiveFormattingPreference",
+        deb822_file: Deb822FileElement,
+        formatter: FormatterCallback,
+        _content: str,
+        position_codec: LintCapablePositionCodec,
+        lines: List[str],
+    ) -> Iterable[TextEdit]:
+        stanza_idx = -1
+        for token_or_element in deb822_file.iter_parts():
+            if isinstance(token_or_element, Deb822ParagraphElement):
+                stanza_range = token_or_element.range_in_parent()
+                stanza_idx += 1
+                stanza_metadata = self.classify_stanza(token_or_element, stanza_idx)
+                yield from stanza_metadata.reformat_stanza(
+                    effective_preference,
+                    token_or_element,
+                    stanza_range,
+                    formatter,
+                    position_codec,
+                    lines,
+                )
+            else:
+                token_range = token_or_element.range_in_parent()
+                yield from trim_end_of_line_whitespace(
+                    position_codec,
+                    lines,
+                    line_range=range(
+                        token_range.start_pos.line_position,
+                        token_range.end_pos.line_position,
+                    ),
+                )
+
 
 _DCTRL_SOURCE_STANZA = DctrlStanzaMetadata(
     "Source",
@@ -3190,7 +4946,9 @@ _DTESTSCTRL_STANZA = DTestsCtrlStanzaMetadata("Tests", _DTESTSCTRL_FIELDS)
 
 
 class Dep5FileMetadata(Deb822FileMetadata[Dep5StanzaMetadata]):
-    def classify_stanza(self, stanza: Deb822ParagraphElement, stanza_idx: int) -> S:
+    def classify_stanza(
+        self, stanza: Deb822ParagraphElement, stanza_idx: int
+    ) -> Dep5StanzaMetadata:
         if stanza_idx == 0:
             return _DEP5_HEADER_STANZA
         if stanza_idx > 0:
@@ -3199,19 +4957,19 @@ class Dep5FileMetadata(Deb822FileMetadata[Dep5StanzaMetadata]):
             return _DEP5_LICENSE_STANZA
         raise ValueError("The stanza_idx must be 0 or greater")
 
-    def guess_stanza_classification_by_idx(self, stanza_idx: int) -> S:
+    def guess_stanza_classification_by_idx(self, stanza_idx: int) -> Dep5StanzaMetadata:
         if stanza_idx == 0:
             return _DEP5_HEADER_STANZA
         if stanza_idx > 0:
             return _DEP5_FILES_STANZA
         raise ValueError("The stanza_idx must be 0 or greater")
 
-    def stanza_types(self) -> Iterable[S]:
+    def stanza_types(self) -> Iterable[Dep5StanzaMetadata]:
         yield _DEP5_HEADER_STANZA
         yield _DEP5_FILES_STANZA
         yield _DEP5_LICENSE_STANZA
 
-    def __getitem__(self, item: str) -> S:
+    def __getitem__(self, item: str) -> Dep5StanzaMetadata:
         if item == "Header":
             return _DEP5_FILES_STANZA
         if item == "Files":
@@ -3222,23 +4980,97 @@ class Dep5FileMetadata(Deb822FileMetadata[Dep5StanzaMetadata]):
 
 
 class DctrlFileMetadata(Deb822FileMetadata[DctrlStanzaMetadata]):
-    def guess_stanza_classification_by_idx(self, stanza_idx: int) -> S:
+    def guess_stanza_classification_by_idx(
+        self, stanza_idx: int
+    ) -> DctrlStanzaMetadata:
         if stanza_idx == 0:
             return _DCTRL_SOURCE_STANZA
         if stanza_idx > 0:
             return _DCTRL_PACKAGE_STANZA
         raise ValueError("The stanza_idx must be 0 or greater")
 
-    def stanza_types(self) -> Iterable[S]:
+    def stanza_types(self) -> Iterable[DctrlStanzaMetadata]:
         yield _DCTRL_SOURCE_STANZA
         yield _DCTRL_PACKAGE_STANZA
 
-    def __getitem__(self, item: str) -> S:
+    def __getitem__(self, item: str) -> DctrlStanzaMetadata:
         if item == "Source":
             return _DCTRL_SOURCE_STANZA
         if item == "Package":
             return _DCTRL_PACKAGE_STANZA
         raise KeyError(item)
+
+    def reformat(
+        self,
+        effective_preference: "EffectiveFormattingPreference",
+        deb822_file: Deb822FileElement,
+        formatter: FormatterCallback,
+        content: str,
+        position_codec: LintCapablePositionCodec,
+        lines: List[str],
+    ) -> Iterable[TextEdit]:
+        edits = list(
+            super().reformat(
+                effective_preference,
+                deb822_file,
+                formatter,
+                content,
+                position_codec,
+                lines,
+            )
+        )
+
+        if (
+            not effective_preference.deb822_normalize_stanza_order
+            or deb822_file.find_first_error_element() is not None
+        ):
+            return edits
+        names = []
+        for idx, stanza in enumerate(deb822_file):
+            if idx < 2:
+                continue
+            name = stanza.get("Package")
+            if name is None:
+                return edits
+            names.append(name)
+
+        reordered = sorted(names)
+        if names == reordered:
+            return edits
+
+        if edits:
+            content = apply_text_edits(content, lines, edits)
+            lines = content.splitlines(keepends=True)
+            deb822_file = parse_deb822_file(
+                lines,
+                accept_files_with_duplicated_fields=True,
+                accept_files_with_error_tokens=True,
+            )
+
+        stanzas = list(deb822_file)
+        reordered_stanza = stanzas[:2] + sorted(
+            stanzas[2:], key=operator.itemgetter("Package")
+        )
+        bits = []
+        stanza_idx = 0
+        for token_or_element in deb822_file.iter_parts():
+            if isinstance(token_or_element, Deb822ParagraphElement):
+                bits.append(reordered_stanza[stanza_idx].dump())
+                stanza_idx += 1
+            else:
+                bits.append(token_or_element.convert_to_text())
+
+        new_content = "".join(bits)
+
+        return [
+            TextEdit(
+                Range(
+                    Position(0, 0),
+                    Position(len(lines) + 1, 0),
+                ),
+                new_content,
+            )
+        ]
 
 
 class DTestsCtrlFileMetadata(Deb822FileMetadata[DctrlStanzaMetadata]):

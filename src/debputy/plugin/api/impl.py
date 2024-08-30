@@ -30,6 +30,9 @@ from typing import (
     FrozenSet,
     Any,
     Literal,
+    Container,
+    TYPE_CHECKING,
+    is_typeddict,
 )
 
 from debputy import DEBPUTY_DOC_ROOT_DIR
@@ -41,16 +44,18 @@ from debputy.exceptions import (
     PluginInitializationError,
     PluginAPIViolationError,
     PluginNotFoundError,
+    PluginIncorrectRegistrationError,
 )
 from debputy.maintscript_snippet import (
     STD_CONTROL_SCRIPTS,
     MaintscriptSnippetContainer,
     MaintscriptSnippet,
 )
-from debputy.manifest_parser.base_types import TypeMapping
 from debputy.manifest_parser.exceptions import ManifestParseException
 from debputy.manifest_parser.parser_data import ParserContextData
+from debputy.manifest_parser.tagging_types import TypeMapping
 from debputy.manifest_parser.util import AttributePath
+from debputy.manifest_parser.util import resolve_package_type_selectors
 from debputy.plugin.api.feature_set import PluginProvidedFeatureSet
 from debputy.plugin.api.impl_types import (
     DebputyPluginMetadata,
@@ -68,11 +73,12 @@ from debputy.plugin.api.impl_types import (
     AutomaticDiscardRuleExample,
     PPFFormatParam,
     ServiceManagerDetails,
-    resolve_package_type_selectors,
     KnownPackagingFileInfo,
     PluginProvidedKnownPackagingFile,
     InstallPatternDHCompatRule,
     PluginProvidedTypeMapping,
+    PluginProvidedBuildSystemAutoDetection,
+    BSR,
 )
 from debputy.plugin.api.plugin_parser import (
     PLUGIN_METADATA_PARSER,
@@ -105,6 +111,22 @@ from debputy.plugin.api.spec import (
     PackagerProvidedFileReferenceDocumentation,
     packager_provided_file_reference_documentation,
     TypeMappingDocumentation,
+    DebputyIntegrationMode,
+    reference_documentation,
+    _DEBPUTY_DISPATCH_METADATA_ATTR_NAME,
+    BuildSystemManifestRuleMetadata,
+)
+from debputy.plugin.api.std_docs import _STD_ATTR_DOCS
+from debputy.plugin.debputy.to_be_api_types import (
+    BuildSystemRule,
+    BuildRuleParsedFormat,
+    BSPF,
+    debputy_build_system,
+)
+from debputy.plugin.plugin_state import (
+    run_in_context_of_plugin,
+    run_in_context_of_plugin_wrap_errors,
+    wrap_plugin_code,
 )
 from debputy.substitution import (
     Substitution,
@@ -119,6 +141,9 @@ from debputy.util import (
     print_command,
     _warn,
 )
+
+if TYPE_CHECKING:
+    from debputy.highlevel_manifest import HighLevelManifest
 
 PLUGIN_TEST_SUFFIX = re.compile(r"_(?:t|test|check)(?:_([a-z0-9_]+))?[.]py$")
 
@@ -359,7 +384,7 @@ class DebputyPluginInitializerProvider(DebputyPluginInitializer):
         all_detectors[self._plugin_name].append(
             MetadataOrMaintscriptDetector(
                 detector_id=auto_detector_id,
-                detector=auto_detector,
+                detector=wrap_plugin_code(self._plugin_name, auto_detector),
                 plugin_metadata=self._plugin_metadata,
                 applies_to_package_types=package_types,
                 enabled=True,
@@ -572,7 +597,7 @@ class DebputyPluginInitializerProvider(DebputyPluginInitializer):
         package_processors[processor_key] = PluginProvidedPackageProcessor(
             processor_id,
             resolve_package_type_selectors(package_type),
-            processor,
+            wrap_plugin_code(self._plugin_name, processor),
             frozenset(dependencies),
             self._plugin_metadata,
         )
@@ -701,8 +726,8 @@ class DebputyPluginInitializerProvider(DebputyPluginInitializer):
             )
         service_managers[service_manager] = ServiceManagerDetails(
             service_manager,
-            detector,
-            integrator,
+            wrap_plugin_code(self._plugin_name, detector),
+            wrap_plugin_code(self._plugin_name, integrator),
             self._plugin_metadata,
         )
 
@@ -773,7 +798,7 @@ class DebputyPluginInitializerProvider(DebputyPluginInitializer):
         dispatching_parser = parser_generator.dispatchable_table_parsers[rule_type]
         dispatching_parser.register_keyword(
             rule_name,
-            handler,
+            wrap_plugin_code(self._plugin_name, handler),
             self._plugin_metadata,
             inline_reference_documentation=inline_reference_documentation,
         )
@@ -817,6 +842,10 @@ class DebputyPluginInitializerProvider(DebputyPluginInitializer):
             )
         parent_dispatcher = dispatchable_object_parsers[rule_type]
         child_dispatcher = dispatchable_object_parsers[object_parser_key]
+
+        if on_end_parse_step is not None:
+            on_end_parse_step = wrap_plugin_code(self._plugin_name, on_end_parse_step)
+
         parent_dispatcher.register_child_parser(
             rule_name,
             child_dispatcher,
@@ -835,14 +864,24 @@ class DebputyPluginInitializerProvider(DebputyPluginInitializer):
     def pluggable_manifest_rule(
         self,
         rule_type: Union[TTP, str],
-        rule_name: Union[str, List[str]],
+        rule_name: Union[str, Sequence[str]],
         parsed_format: Type[PF],
         handler: DIPHandler,
         *,
         source_format: Optional[SF] = None,
         inline_reference_documentation: Optional[ParserDocumentation] = None,
+        expected_debputy_integration_mode: Optional[
+            Container[DebputyIntegrationMode]
+        ] = None,
+        apply_standard_attribute_documentation: bool = False,
     ) -> None:
+        # When unrestricted this, consider which types will be unrestricted
         self._restricted_api()
+        if apply_standard_attribute_documentation and sys.version_info < (3, 12):
+            _error(
+                f"The plugin {self._plugin_metadata.plugin_name} requires python 3.12 due to"
+                f" its use of apply_standard_attribute_documentation"
+            )
         feature_set = self._feature_set
         parser_generator = feature_set.manifest_parser_generator
         if isinstance(rule_type, str):
@@ -864,15 +903,22 @@ class DebputyPluginInitializerProvider(DebputyPluginInitializer):
                 )
             dispatching_parser = parser_generator.dispatchable_table_parsers[rule_type]
 
+        if apply_standard_attribute_documentation:
+            docs = _STD_ATTR_DOCS
+        else:
+            docs = None
+
         parser = feature_set.manifest_parser_generator.generate_parser(
             parsed_format,
             source_content=source_format,
             inline_reference_documentation=inline_reference_documentation,
+            expected_debputy_integration_mode=expected_debputy_integration_mode,
+            automatic_docs=docs,
         )
         dispatching_parser.register_parser(
             rule_name,
             parser,
-            handler,
+            wrap_plugin_code(self._plugin_name, handler),
             self._plugin_metadata,
         )
 
@@ -880,6 +926,108 @@ class DebputyPluginInitializerProvider(DebputyPluginInitializer):
             raise PluginInitializationError(
                 "Cannot unload pluggable_manifest_rule (not implemented)"
             )
+
+        self._unloaders.append(_unload)
+
+    def register_build_system(
+        self,
+        build_system_definition: type[BSPF],
+    ) -> None:
+        self._restricted_api()
+        if not is_typeddict(build_system_definition):
+            raise PluginInitializationError(
+                f"Expected build_system_definition to be a subclass of {BuildRuleParsedFormat.__name__},"
+                f" but got {build_system_definition.__name__} instead"
+            )
+        metadata = getattr(
+            build_system_definition,
+            _DEBPUTY_DISPATCH_METADATA_ATTR_NAME,
+            None,
+        )
+        if not isinstance(metadata, BuildSystemManifestRuleMetadata):
+            raise PluginIncorrectRegistrationError(
+                f"The {build_system_definition.__qualname__} type should have been annotated with"
+                f" @{debputy_build_system.__name__}."
+            )
+        assert len(metadata.manifest_keywords) == 1
+        build_system_impl = metadata.build_system_impl
+        assert build_system_impl is not None
+        manifest_keyword = next(iter(metadata.manifest_keywords))
+        self.pluggable_manifest_rule(
+            metadata.dispatched_type,
+            metadata.manifest_keywords,
+            build_system_definition,
+            # pluggable_manifest_rule does the wrapping
+            metadata.unwrapped_constructor,
+            source_format=metadata.source_format,
+        )
+        self._auto_detectable_build_system(
+            manifest_keyword,
+            build_system_impl,
+            constructor=wrap_plugin_code(
+                self._plugin_name,
+                build_system_impl,
+            ),
+            shadowing_build_systems_when_active=metadata.auto_detection_shadow_build_systems,
+        )
+
+    def _auto_detectable_build_system(
+        self,
+        manifest_keyword: str,
+        rule_type: type[BSR],
+        *,
+        shadowing_build_systems_when_active: FrozenSet[str] = frozenset(),
+        constructor: Optional[
+            Callable[[BuildRuleParsedFormat, AttributePath, "HighLevelManifest"], BSR]
+        ] = None,
+    ) -> None:
+        self._restricted_api()
+        feature_set = self._feature_set
+        existing = feature_set.auto_detectable_build_systems.get(rule_type)
+        if existing is not None:
+            bs_name = rule_type.__class__.__name__
+            if existing.plugin_metadata.plugin_name == self._plugin_name:
+                message = (
+                    f"Bug in the plugin {self._plugin_name}: It tried to register the"
+                    f' auto-detection of the build system "{bs_name}" twice.'
+                )
+            else:
+                message = (
+                    f"The plugins {existing.plugin_metadata.plugin_name} and {self._plugin_name}"
+                    f' both tried to provide auto-detection of the build system "{bs_name}"'
+                )
+            raise PluginConflictError(
+                message, existing.plugin_metadata, self._plugin_metadata
+            )
+
+        if constructor is None:
+
+            def impl(
+                attributes: BuildRuleParsedFormat,
+                attribute_path: AttributePath,
+                manifest: "HighLevelManifest",
+            ) -> BSR:
+                return rule_type(attributes, attribute_path, manifest)
+
+        else:
+            impl = constructor
+
+        feature_set.auto_detectable_build_systems[rule_type] = (
+            PluginProvidedBuildSystemAutoDetection(
+                manifest_keyword,
+                rule_type,
+                wrap_plugin_code(self._plugin_name, rule_type.auto_detect_build_system),
+                impl,
+                shadowing_build_systems_when_active,
+                self._plugin_metadata,
+            )
+        )
+
+        def _unload() -> None:
+            try:
+                del feature_set.auto_detectable_build_systems[rule_type]
+            except KeyError:
+                pass
 
         self._unloaders.append(_unload)
 
@@ -974,6 +1122,7 @@ class DebputyPluginInitializerProvider(DebputyPluginInitializer):
                 message, existing.plugin_metadata, self._plugin_metadata
             )
         parser_generator = self._feature_set.manifest_parser_generator
+        # TODO: Wrap the mapper in the plugin context
         mapped_types[target_type] = PluginProvidedTypeMapping(
             type_mapping, reference_documentation, self._plugin_metadata
         )
@@ -1430,6 +1579,10 @@ def load_plugin_features(
             if plugin_metadata.plugin_name not in unloadable_plugins:
                 raise
             if debug_mode:
+                _warn(
+                    f"The optional plugin {plugin_metadata.plugin_name} failed during load. Re-raising due"
+                    f" to --debug/-d."
+                )
                 raise
             try:
                 api.unload_plugin()
@@ -1441,11 +1594,6 @@ def load_plugin_features(
                 )
                 raise e from None
             else:
-                if debug_mode:
-                    _warn(
-                        f"The optional plugin {plugin_metadata.plugin_name} failed during load. Re-raising due"
-                        f" to --debug/-d."
-                    )
                 _warn(
                     f"The optional plugin {plugin_metadata.plugin_name} failed during load. The plugin was"
                     f" deactivated. Use debug mode (--debug) to show the stacktrace (the warning will become an error)"
@@ -1466,8 +1614,7 @@ def find_json_plugin(
 def find_related_implementation_files_for_plugin(
     plugin_metadata: DebputyPluginMetadata,
 ) -> List[str]:
-    plugin_path = plugin_metadata.plugin_path
-    if not os.path.isfile(plugin_path):
+    if plugin_metadata.is_bundled:
         plugin_name = plugin_metadata.plugin_name
         _error(
             f"Cannot run find related files for {plugin_name}: The plugin seems to be bundled"
@@ -1500,7 +1647,7 @@ def find_tests_for_plugin(
     plugin_name = plugin_metadata.plugin_name
     plugin_path = plugin_metadata.plugin_path
 
-    if not os.path.isfile(plugin_path):
+    if plugin_metadata.is_bundled:
         _error(
             f"Cannot run tests for {plugin_name}: The plugin seems to be bundled or loaded via a"
             " mechanism that does not support detecting its tests."
@@ -1629,7 +1776,7 @@ def _resolve_module_initializer(
                 )
             sys.modules[module_name] = mod
             try:
-                loader.exec_module(mod)
+                run_in_context_of_plugin(plugin_name, loader.exec_module, mod)
             except (Exception, GeneratorExit) as e:
                 raise PluginInitializationError(
                     f"Failed to load {plugin_name} (path: {module_fs_path})."
@@ -1639,7 +1786,9 @@ def _resolve_module_initializer(
 
     if module is None:
         try:
-            module = importlib.import_module(module_name)
+            module = run_in_context_of_plugin(
+                plugin_name, importlib.import_module, module_name
+            )
         except ModuleNotFoundError as e:
             if module_fs_path is None:
                 raise PluginMetadataError(
@@ -1654,7 +1803,12 @@ def _resolve_module_initializer(
                 f' explicit "module" definition in {json_file_path}.'
             ) from e
 
-    plugin_initializer = getattr(module, plugin_initializer_name)
+    plugin_initializer = run_in_context_of_plugin_wrap_errors(
+        plugin_name,
+        getattr,
+        module,
+        plugin_initializer_name,
+    )
 
     if plugin_initializer is None:
         raise PluginMetadataError(
@@ -1861,7 +2015,7 @@ def parse_json_plugin_desc(
             f" clash with the bundled plugin of same name."
         )
 
-    attribute_path = AttributePath.root_path()
+    attribute_path = AttributePath.root_path(raw)
 
     try:
         plugin_json_metadata = PLUGIN_METADATA_PARSER.parse_input(

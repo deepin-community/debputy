@@ -1,8 +1,8 @@
 import argparse
-import itertools
 import operator
 import os
 import sys
+import textwrap
 from itertools import chain
 from typing import (
     Sequence,
@@ -12,17 +12,16 @@ from typing import (
     Any,
     Optional,
     Type,
-    Mapping,
     Callable,
 )
 
 from debputy import DEBPUTY_DOC_ROOT_DIR
+from debputy.analysis.analysis_util import flatten_ppfs
 from debputy.commands.debputy_cmd.context import (
     CommandContext,
     add_arg,
     ROOT_COMMAND,
 )
-from debputy.commands.debputy_cmd.dc_util import flatten_ppfs
 from debputy.commands.debputy_cmd.output import (
     _stream_to_pager,
     _output_styling,
@@ -30,10 +29,8 @@ from debputy.commands.debputy_cmd.output import (
 )
 from debputy.exceptions import DebputySubstitutionError
 from debputy.filesystem_scan import build_virtual_fs
-from debputy.manifest_parser.base_types import TypeMapping
+from debputy.manifest_parser.tagging_types import TypeMapping
 from debputy.manifest_parser.declarative_parser import (
-    DeclarativeMappingInputParser,
-    DeclarativeNonMappingInputParser,
     BASIC_SIMPLE_TYPES,
 )
 from debputy.manifest_parser.parser_data import ParserContextData
@@ -49,24 +46,20 @@ from debputy.plugin.api.impl_types import (
     PackagerProvidedFileClassSpec,
     PluginProvidedManifestVariable,
     DispatchingParserBase,
-    DeclarativeInputParser,
-    DebputyPluginMetadata,
-    DispatchingObjectParser,
-    SUPPORTED_DISPATCHABLE_TABLE_PARSERS,
-    OPARSER_MANIFEST_ROOT,
     PluginProvidedDiscardRule,
     AutomaticDiscardRuleExample,
     MetadataOrMaintscriptDetector,
     PluginProvidedTypeMapping,
 )
+from debputy.plugin.api.parser_tables import (
+    SUPPORTED_DISPATCHABLE_TABLE_PARSERS,
+    OPARSER_MANIFEST_ROOT,
+)
 from debputy.plugin.api.spec import (
-    ParserDocumentation,
-    reference_documentation,
-    undocumented_attr,
     TypeMappingExample,
 )
 from debputy.substitution import Substitution
-from debputy.util import _error, assume_not_none, _warn
+from debputy.util import _error, _warn
 
 plugin_dispatcher = ROOT_COMMAND.add_dispatching_subcommand(
     "plugin",
@@ -548,7 +541,16 @@ def _plugin_cmd_show_manifest_variables(context: CommandContext) -> None:
             variable_value=None,
             is_context_specific_variable=False,
             is_documentation_placeholder=True,
-            variable_reference_documentation=f'Environment variable "{env_var}"',
+            variable_reference_documentation=textwrap.dedent(
+                f"""\
+            Environment variable "{env_var}"
+
+            Note that uses beneath `builds:` may use the environment variable defined by
+            `build-environment:` (depends on whether the rule uses eager or lazy
+            substitution) while uses outside `builds:` will generally not use a definition
+            from `build-environment:`.
+            """
+            ),
         )
     else:
         variable = variables.get(variable_name)
@@ -1189,7 +1191,7 @@ def _render_value(v: Any) -> str:
     return str(v)
 
 
-def ensure_plugin_commands_are_loaded():
+def ensure_plugin_commands_are_loaded() -> None:
     # Loading the module does the heavy lifting
     # However, having this function means that we do not have an "unused" import that some tool
     # gets tempted to remove

@@ -57,6 +57,7 @@ from debputy.util import (
     escape_shell,
     assume_not_none,
     _normalize_path,
+    _debug_log,
 )
 
 BY_BASENAME = operator.attrgetter("name")
@@ -668,7 +669,7 @@ class FSPath(VirtualPathBase, ABC):
     @mode.setter
     def mode(self, new_mode: int) -> None:
         self._rw_check()
-        min_bit = 0o500 if self.is_dir else 0o400
+        min_bit = 0o700 if self.is_dir else 0o400
         if (new_mode & min_bit) != min_bit:
             omode = oct(new_mode)[2:]
             omin = oct(min_bit)[2:]
@@ -679,6 +680,22 @@ class FSPath(VirtualPathBase, ABC):
                 " problems during build or on the final system."
             )
         self._mode = new_mode
+
+    def _ensure_min_mode(self) -> None:
+        min_bit = 0o700 if self.is_dir else 0o600
+        if self.has_fs_path and (self.mode & 0o600) != 0o600:
+            try:
+                fs_path = self.fs_path
+            except TestPathWithNonExistentFSPathError:
+                pass
+            else:
+                st = os.stat(fs_path)
+                new_fs_mode = stat.S_IMODE(st.st_mode) | min_bit
+                _debug_log(
+                    f"Applying chmod {oct(min_bit)[2:]} {fs_path} ({self.path}) to avoid problems down the line"
+                )
+                os.chmod(fs_path, new_fs_mode)
+            self.mode |= min_bit
 
     @property
     def mtime(self) -> float:
@@ -1243,6 +1260,7 @@ class VirtualDirectoryFSPath(VirtualPathWithReference):
         )
         self._reference_path = reference_path
         assert reference_path is None or reference_path.is_dir
+        self._ensure_min_mode()
 
     @property
     def is_dir(self) -> bool:
@@ -1326,6 +1344,7 @@ class FSBackedFilePath(VirtualPathWithReference):
         assert (
             not replaceable_inline or "debputy/scratch-dir/" in fs_path
         ), f"{fs_path} should not be inline-replaceable -- {self.path}"
+        self._ensure_min_mode()
 
     @property
     def is_dir(self) -> bool:
@@ -1565,7 +1584,8 @@ class FSROOverlay(VirtualPathBase):
         parent: Optional["FSROOverlay"],
     ) -> None:
         self._path: str = path
-        self._fs_path: str = _normalize_path(fs_path, with_prefix=False)
+        prefix = "/" if fs_path.startswith("/") else ""
+        self._fs_path: str = prefix + _normalize_path(fs_path, with_prefix=False)
         self._parent: Optional[ReferenceType[FSROOverlay]] = (
             ref(parent) if parent is not None else None
         )
@@ -1603,9 +1623,9 @@ class FSROOverlay(VirtualPathBase):
                 continue
             if dir_part == "..":
                 p = current.parent_dir
-                if current is None:
+                if p is None:
                     raise ValueError(f'The path "{path}" escapes the root dir')
-                current = p
+                current = cast("FSROOverlay", p)
                 continue
             try:
                 current = current[dir_part]

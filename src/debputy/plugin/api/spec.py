@@ -23,6 +23,9 @@ from typing import (
     List,
     Type,
     Tuple,
+    get_args,
+    Container,
+    final,
 )
 
 from debian.substvars import Substvars
@@ -30,15 +33,21 @@ from debian.substvars import Substvars
 from debputy import util
 from debputy.exceptions import TestPathWithNonExistentFSPathError, PureVirtualPathError
 from debputy.interpreter import Interpreter, extract_shebang_interpreter_from_file
+from debputy.manifest_parser.tagging_types import DebputyDispatchableType
 from debputy.manifest_parser.util import parse_symbolic_mode
 from debputy.packages import BinaryPackage
 from debputy.types import S
 
 if TYPE_CHECKING:
+    from debputy.plugin.debputy.to_be_api_types import BuildRule, BSR, BuildSystemRule
+    from debputy.plugin.api.impl_types import DIPHandler
     from debputy.manifest_parser.base_types import (
         StaticFileSystemOwner,
         StaticFileSystemGroup,
     )
+
+
+DP = TypeVar("DP", bound=DebputyDispatchableType)
 
 
 PluginInitializationEntryPoint = Callable[["DebputyPluginInitializer"], None]
@@ -78,6 +87,32 @@ ServiceIntegrator = Callable[
 ]
 
 PMT = TypeVar("PMT")
+DebputyIntegrationMode = Literal[
+    "full",
+    "dh-sequence-zz-debputy",
+    "dh-sequence-zz-debputy-rrr",
+]
+
+INTEGRATION_MODE_FULL: DebputyIntegrationMode = "full"
+INTEGRATION_MODE_DH_DEBPUTY_RRR: DebputyIntegrationMode = "dh-sequence-zz-debputy-rrr"
+INTEGRATION_MODE_DH_DEBPUTY: DebputyIntegrationMode = "dh-sequence-zz-debputy"
+ALL_DEBPUTY_INTEGRATION_MODES: FrozenSet[DebputyIntegrationMode] = frozenset(
+    get_args(DebputyIntegrationMode)
+)
+
+_DEBPUTY_DISPATCH_METADATA_ATTR_NAME = "_debputy_dispatch_metadata"
+
+
+def only_integrations(
+    *integrations: DebputyIntegrationMode,
+) -> Container[DebputyIntegrationMode]:
+    return frozenset(integrations)
+
+
+def not_integrations(
+    *integrations: DebputyIntegrationMode,
+) -> Container[DebputyIntegrationMode]:
+    return ALL_DEBPUTY_INTEGRATION_MODES - frozenset(integrations)
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -185,6 +220,27 @@ class PathDef:
     link_target: Optional[str] = None
     content: Optional[str] = None
     materialized_content: Optional[str] = None
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class DispatchablePluggableManifestRuleMetadata(Generic[DP]):
+    """NOT PUBLIC API (used internally by part of the public API)"""
+
+    manifest_keywords: Sequence[str]
+    dispatched_type: Type[DP]
+    unwrapped_constructor: "DIPHandler"
+    expected_debputy_integration_mode: Optional[Container[DebputyIntegrationMode]] = (
+        None
+    )
+    online_reference_documentation: Optional["ParserDocumentation"] = None
+    apply_standard_attribute_documentation: bool = False
+    source_format: Optional[Any] = None
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class BuildSystemManifestRuleMetadata(DispatchablePluggableManifestRuleMetadata):
+    build_system_impl: Optional[Type["BuildSystemRule"]] = (None,)
+    auto_detection_shadow_build_systems: FrozenSet[str] = frozenset()
 
 
 def virtual_path_def(
@@ -1046,7 +1102,7 @@ class VirtualPath:
         self,
         *,
         byte_io: Literal[False] = False,
-        buffering: Optional[int] = ...,
+        buffering: int = -1,
     ) -> TextIO: ...
 
     @overload
@@ -1054,7 +1110,7 @@ class VirtualPath:
         self,
         *,
         byte_io: Literal[True],
-        buffering: Optional[int] = ...,
+        buffering: int = -1,
     ) -> BinaryIO: ...
 
     @overload
@@ -1062,7 +1118,7 @@ class VirtualPath:
         self,
         *,
         byte_io: bool,
-        buffering: Optional[int] = ...,
+        buffering: int = -1,
     ) -> Union[TextIO, BinaryIO]: ...
 
     def open(
@@ -1085,7 +1141,7 @@ class VirtualPath:
         :param byte_io: If True, open the file in binary mode (like `rb` for `open`)
         :param buffering: Same as open(..., buffering=...) where supported. Notably during
           testing, the content may be purely in memory and use a BytesIO/StringIO
-          (which does not accept that parameter, but then is buffered in a different way)
+          (which does not accept that parameter, but then it is buffered in a different way)
         :return: The file handle.
         """
 
@@ -1482,6 +1538,16 @@ class ParserAttributeDocumentation:
     attributes: FrozenSet[str]
     description: Optional[str]
 
+    @property
+    def is_hidden(self) -> bool:
+        return False
+
+
+@final
+@dataclasses.dataclass(slots=True, frozen=True)
+class StandardParserAttributeDocumentation(ParserAttributeDocumentation):
+    sort_category: int = 0
+
 
 def undocumented_attr(attr: str) -> ParserAttributeDocumentation:
     """Describe an attribute as undocumented
@@ -1489,6 +1555,8 @@ def undocumented_attr(attr: str) -> ParserAttributeDocumentation:
     If you for some reason do not want to document a particular attribute, you can mark it as
     undocumented. This is required if you are only documenting a subset of the attributes,
     because `debputy` assumes any omission to be a mistake.
+
+    :param attr: Name of the attribute
     """
     return ParserAttributeDocumentation(
         frozenset({attr}),

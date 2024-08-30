@@ -4,9 +4,9 @@
 # Copyright 2021- Python Language Server Contributors.
 # License: Expat (MIT/X11)
 #
-from typing import List
+from typing import List, Sequence
 
-from lsprotocol.types import Range, TextEdit, Position
+from debputy.lsprotocol.types import Range, TextEdit, Position
 
 
 def get_well_formatted_range(lsp_range: Range) -> Range:
@@ -88,7 +88,11 @@ def offset_at_position(lines: List[str], server_position: Position) -> int:
     return col + sum(len(line) for line in lines[:row])
 
 
-def apply_text_edits(text: str, lines: List[str], text_edits: List[TextEdit]) -> str:
+def apply_text_edits(
+    text: str,
+    lines: List[str],
+    text_edits: Sequence[TextEdit],
+) -> str:
     sorted_edits = merge_sort_text_edits(
         [get_well_formatted_edit(e) for e in text_edits]
     )

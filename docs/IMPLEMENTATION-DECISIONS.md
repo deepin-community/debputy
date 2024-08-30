@@ -204,3 +204,32 @@ integration up and running.  When designing it, the following things were import
 
 At the time of writing, the plugin integration is still in development.  What is important can change
 as we get actual users.
+
+# Plugin module import vs. initialization design
+
+When loading the python code for plugins, there were multiple ways to initialize the plugin:
+
+ 1. The plugin could have an initialization function that is called by `debputy`
+
+ 2. The plugin could use `@some_feature` annotations on types to be registered. This is similar
+    in spirit to the `dh` add-on system where module load is considered the initialization event.
+
+The 1. option was chosen because it is more reliable at directing the control flow and enables
+the plugin module to be importable by non-`debputy` code. The latter might not seem directly
+useful, but code like `py.test` attempts to import everything it can (even in `debian/` by
+default) which could cause unwanted breakage for plugin providers by simply adding a
+Python-based  plugin.
+
+With the module autoloads mechanism, `debputy` would have to assume everything imported is
+part of the plugin. This can cause issues (misattribution of errors) when a plugin loads
+code or definitions from another plugin in addition to the `py.test` problem above. Safeguards
+could be added, but the solutions found would either break the "py.test can import the module"-
+property (see above) or be "safety is opt-in rather than always on/opt-out" by having an explicit
+"This is plugin X code coming now" - the absence of a marker then causing misattribution).
+
+If these problems could be solved, the annotation based loading could be considered.
+
+Note: This is not to say that `@feature` cannot be used at all in the plugin code. The annotation
+can be used to add metadata to things that simplify the logic required by the initialization
+function. The annotation would have to be stateless and cannot make assumptions about which
+plugin is being loaded while it is run.

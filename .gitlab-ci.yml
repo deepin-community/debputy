@@ -7,37 +7,90 @@ include:
 
 stages:
   - ci-test
+  - ci-os-support
   - aggregate-coverage
   - pages
+  - os-build-tests
   - provisioning
   - build
   - publish
   - test
 
 tests-testing:
-  stage: ci-test
-  image: debian:testing
+  stage: os-build-tests
+  image: debian:testing-slim
   script:
     - apt-get update
     - apt-get build-dep -y .
     - dpkg-buildpackage -us -uc -tc
 
+
 tests-unstable:
-  stage: ci-test
-  image: debian:unstable
+  stage: os-build-tests
+  image: debian:unstable-slim
   script:
     - apt-get update
     - apt-get build-dep -Ppkg.debputy.ci -y .
     - dpkg-buildpackage -Ppkg.debputy.ci -us -uc -tc
 
+
+tests-unstable-like-bookworm-backports:
+  # This removes dependencies not available in `bookworm-backports`, which broke
+  # in the first backport.
+  stage: os-build-tests
+  image: debian:unstable-slim
+  script:
+    - apt-get update
+    - apt-get build-dep -Ppkg.debputy.ci -y .
+    - dpkg-buildpackage -Ppkg.debputy.ci,pkg.debputy.bookworm-backports -us -uc -tc
+
+
+tests-ubuntu-noble:
+  stage: os-build-tests
+  image: ubuntu:noble
+  script:
+    - apt-get update
+    - apt-get build-dep -Ppkg.debputy.ci -y .
+    - dpkg-buildpackage -Ppkg.debputy.ci -us -uc -tc
+
+
+tests-debian-bookwork-backports:
+  stage: os-build-tests
+  image: debian:bookworm-slim
+  script:
+    - apt-get update
+    - apt-get build-dep -Ppkg.debputy.ci,pkg.debputy.bookworm-backports -y .
+    - dpkg-buildpackage -Ppkg.debputy.ci,pkg.debputy.bookworm-backports -us -uc -tc
+
+
+code-lint-mypy:
+  stage: ci-test
+  image: debian:unstable-slim
+  script:
+    - apt-get update
+    - apt-get build-dep -Ppkg.debputy.ci -y .
+    - apt-get install -y mypy python3-lxml
+    # Remove the `|| true` once we get to a sufficient level of typing where we can set the minimum bar
+    - mypy --html-report mypy-report --junit-format per_file --junit-xml mypy-xunit-report.xml --cobertura-xml-report mypy-cobertura-report src tests || true
+  artifacts:
+    paths:
+      - mypy-report
+    reports:
+      junit: mypy-xunit-report.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: mypy-cobertura-report/cobertura.xml
+  except:
+    variables:
+      - $CI_COMMIT_TAG != null && $SALSA_CI_ENABLE_PIPELINE_ON_TAGS !~ /^(1|yes|true)$/
+
 tests-unstable-coverage-without-optional-bd:
   stage: ci-test
-  image: debian:unstable
+  image: debian:unstable-slim
   script:
     - apt-get update
     - apt-get build-dep -Ppkg.debputy.minimal-tests,pkg.debputy.test-coverage -y .
     - py.test-3 -v --cov --cov-branch --doctest-modules --junit-xml=xunit-report.xml --cov-report xml:coverage.xml
-    - dpkg-buildpackage -Ppkg.debputy.minimal-tests -us -uc -tc
   after_script:
   - mkdir -p coverage-results/tests-unstable-coverage-without-optional-bd
   - cp .coverage coverage-results/tests-unstable-coverage-without-optional-bd/coverage
@@ -52,7 +105,7 @@ tests-unstable-coverage-without-optional-bd:
 
 tests-unstable-coverage:
   stage: ci-test
-  image: debian:unstable
+  image: debian:unstable-slim
   script:
     - apt-get update
     - apt-get build-dep -Ppkg.debputy.test-coverage -y .
@@ -88,9 +141,89 @@ tests-unstable-coverage-with-extra-bd:
         coverage_format: cobertura
         path: coverage.xml
 
+
+tests-ubuntu-noble-coverage-with-extra-bd:
+  stage: ci-os-support
+  image: ubuntu:noble
+  script:
+    - apt-get update
+    - apt-get build-dep -Ppkg.debputy.ci,pkg.debputy.test-coverage -y .
+    - py.test-3 -v --cov --cov-branch --doctest-modules --junit-xml=xunit-report.xml --cov-report xml:coverage.xml
+  after_script:
+  - mkdir -p coverage-results/tests-ubuntu-noble-coverage-with-extra-bd
+  - cp .coverage coverage-results/tests-ubuntu-noble-coverage-with-extra-bd/coverage
+  artifacts:
+    paths:
+      - coverage-results/tests-ubuntu-noble-coverage-with-extra-bd
+    reports:
+      junit: xunit-report.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+
+
+tests-ubuntu-noble-coverage-without-optional-bd:
+  stage: ci-os-support
+  image: ubuntu:noble
+  script:
+    - apt-get update
+    - apt-get build-dep -Ppkg.debputy.minimal-tests,pkg.debputy.test-coverage -y .
+    - py.test-3 -v --cov --cov-branch --doctest-modules --junit-xml=xunit-report.xml --cov-report xml:coverage.xml
+  after_script:
+  - mkdir -p coverage-results/tests-ubuntu-noble-coverage-without-optional-bd
+  - cp .coverage coverage-results/tests-ubuntu-noble-coverage-without-optional-bd/coverage
+  artifacts:
+    paths:
+      - coverage-results/tests-ubuntu-noble-coverage-without-optional-bd
+    reports:
+      junit: xunit-report.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+
+tests-debian-bookworm-backports-coverage-with-extra-bd:
+  stage: ci-os-support
+  image: debian:bookworm-slim
+  script:
+    - apt-get update
+    - apt-get build-dep -Ppkg.debputy.ci,pkg.debputy.test-coverage,pkg.debputy.bookworm-backports -y .
+    - py.test-3 -v --cov --cov-branch --doctest-modules --junit-xml=xunit-report.xml --cov-report xml:coverage.xml
+  after_script:
+  - mkdir -p coverage-results/tests-ubuntu-noble-coverage-with-extra-bd
+  - cp .coverage coverage-results/tests-ubuntu-noble-coverage-with-extra-bd/coverage
+  artifacts:
+    paths:
+      - coverage-results/tests-ubuntu-noble-coverage-with-extra-bd
+    reports:
+      junit: xunit-report.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+
+
+tests-debian-bookworm-backports-coverage-without-optional-bd:
+  stage: ci-os-support
+  image: debian:bookworm-slim
+  script:
+    - apt-get update
+    - apt-get build-dep -Ppkg.debputy.minimal-tests,pkg.debputy.test-coverage,pkg.debputy.bookworm-backports -y .
+    - py.test-3 -v --cov --cov-branch --doctest-modules --junit-xml=xunit-report.xml --cov-report xml:coverage.xml
+  after_script:
+  - mkdir -p coverage-results/tests-ubuntu-noble-coverage-without-optional-bd
+  - cp .coverage coverage-results/tests-ubuntu-noble-coverage-without-optional-bd/coverage
+  artifacts:
+    paths:
+      - coverage-results/tests-ubuntu-noble-coverage-without-optional-bd
+    reports:
+      junit: xunit-report.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+
+
 aggregate-coverage:
   stage: aggregate-coverage
-  image: debian:unstable
+  image: debian:unstable-slim
   coverage: '/(?i)total.*? (100(?:\.0+)?\%|[1-9]?\d(?:\.\d+)?\%)$/'
   script:
   - apt-get update -y
@@ -105,14 +238,18 @@ aggregate-coverage:
   - tests-unstable-coverage
   - tests-unstable-coverage-without-optional-bd
   - tests-unstable-coverage-with-extra-bd
+  - tests-ubuntu-noble-coverage-with-extra-bd
+  - tests-ubuntu-noble-coverage-without-optional-bd
 
 pages:
   stage: pages
   script:
   - mkdir public
   - mv coverage-report public/
+  - mv mypy-report public/
   dependencies:
   - aggregate-coverage
+  - code-lint-mypy
   artifacts:
     paths:
     - public
@@ -120,17 +257,31 @@ pages:
   - main
 
 variables:
-  SALSA_CI_DISABLE_WRAP_AND_SORT: 0
-  SALSA_CI_WRAP_AND_SORT_ARGS: '-abkt'
+  SALSA_CI_DISABLE_WRAP_AND_SORT: 1
   SALSA_CI_AUTOPKGTEST_ALLOWED_EXIT_STATUS: 0
   SALSA_CI_DISABLE_APTLY: 0
+
+debputy-reformat:
+  stage: ci-test
+  image: debian:unstable-slim
+  script:
+    - apt-get update -qq && apt-get -qq build-dep --no-install-recommends --yes . && apt-get -qq install --yes python3-lsprotocol
+    - ./debputy.sh reformat --linter-exit-code --no-auto-fix
+  except:
+    variables:
+      - $CI_COMMIT_TAG != null && $SALSA_CI_ENABLE_PIPELINE_ON_TAGS !~ /^(1|yes|true)$/
 
 debputy-lint:
   stage: ci-test
   image: debian:sid-slim
   script:
-    - apt-get update -qq && apt-get -qq install --no-install-recommends --yes dh-debputy python3-pygls
-    - PERL5LIB=lib debputy lint --spellcheck
+    - apt-get update -qq && apt-get -qq build-dep --no-install-recommends --yes . && apt-get -qq install --yes python3-lsprotocol python3-levenshtein python3-junit.xml
+    - PERL5LIB=lib ./debputy.sh lint --lint-report-format=junit4-xml --report-output debputy-lint-report.xml
+    # Mostly just for the validation that --spellcheck does not crash
+    - PERL5LIB=lib ./debputy.sh lint --spellcheck
   except:
     variables:
       - $CI_COMMIT_TAG != null && $SALSA_CI_ENABLE_PIPELINE_ON_TAGS !~ /^(1|yes|true)$/
+  artifacts:
+    reports:
+      junit: debputy-lint-report.xml

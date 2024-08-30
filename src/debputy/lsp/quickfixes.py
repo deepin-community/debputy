@@ -10,14 +10,14 @@ from typing import (
     Optional,
     List,
     cast,
+    NotRequired,
 )
 
-from lsprotocol.types import (
+from debputy.lsprotocol.types import (
     CodeAction,
     Command,
     CodeActionParams,
     Diagnostic,
-    CodeActionDisabledType,
     TextEdit,
     WorkspaceEdit,
     TextDocumentEdit,
@@ -27,10 +27,14 @@ from lsprotocol.types import (
     CodeActionKind,
 )
 
+from debputy.lsp.diagnostics import DiagnosticData
 from debputy.util import _warn
 
 try:
-    from debian._deb822_repro.locatable import Position as TEPosition, Range as TERange
+    from debputy.lsp.vendoring._deb822_repro.locatable import (
+        Position as TEPosition,
+        Range as TERange,
+    )
 
     from pygls.server import LanguageServer
     from pygls.workspace import TextDocument
@@ -38,7 +42,12 @@ except ImportError:
     pass
 
 
-CodeActionName = Literal["correct-text", "remove-line"]
+CodeActionName = Literal[
+    "correct-text",
+    "remove-line",
+    "remove-range",
+    "insert-text-on-line-after-diagnostic",
+]
 
 
 class CorrectTextCodeAction(TypedDict):
@@ -46,8 +55,18 @@ class CorrectTextCodeAction(TypedDict):
     correct_value: str
 
 
+class InsertTextOnLineAfterDiagnosticCodeAction(TypedDict):
+    code_action: Literal["insert-text-on-line-after-diagnostic"]
+    text_to_insert: str
+
+
 class RemoveLineCodeAction(TypedDict):
     code_action: Literal["remove-line"]
+
+
+class RemoveRangeCodeAction(TypedDict):
+    code_action: Literal["remove-range"]
+    proposed_title: NotRequired[str]
 
 
 def propose_correct_text_quick_fix(correct_value: str) -> CorrectTextCodeAction:
@@ -57,10 +76,30 @@ def propose_correct_text_quick_fix(correct_value: str) -> CorrectTextCodeAction:
     }
 
 
+def propose_insert_text_on_line_after_diagnostic_quick_fix(
+    text_to_insert: str,
+) -> InsertTextOnLineAfterDiagnosticCodeAction:
+    return {
+        "code_action": "insert-text-on-line-after-diagnostic",
+        "text_to_insert": text_to_insert,
+    }
+
+
 def propose_remove_line_quick_fix() -> RemoveLineCodeAction:
     return {
         "code_action": "remove-line",
     }
+
+
+def propose_remove_range_quick_fix(
+    *, proposed_title: Optional[str]
+) -> RemoveRangeCodeAction:
+    r: RemoveRangeCodeAction = {
+        "code_action": "remove-range",
+    }
+    if proposed_title:
+        r["proposed_title"] = proposed_title
+    return r
 
 
 CODE_ACTION_HANDLERS: Dict[
@@ -93,24 +132,64 @@ def _correct_value_code_action(
     diagnostic: Diagnostic,
 ) -> Iterable[Union[CodeAction, Command]]:
     corrected_value = code_action_data["correct_value"]
-    edits = [
-        TextEdit(
-            diagnostic.range,
-            corrected_value,
-        ),
-    ]
+    edit = TextEdit(
+        diagnostic.range,
+        corrected_value,
+    )
     yield CodeAction(
         title=f'Replace with "{corrected_value}"',
         kind=CodeActionKind.QuickFix,
         diagnostics=[diagnostic],
         edit=WorkspaceEdit(
-            changes={code_action_params.text_document.uri: edits},
+            changes={code_action_params.text_document.uri: [edit]},
             document_changes=[
                 TextDocumentEdit(
                     text_document=OptionalVersionedTextDocumentIdentifier(
                         uri=code_action_params.text_document.uri,
                     ),
-                    edits=edits,
+                    edits=[edit],
+                )
+            ],
+        ),
+    )
+
+
+@_code_handler_for("insert-text-on-line-after-diagnostic")
+def _insert_text_on_line_after_diagnostic_code_action(
+    code_action_data: InsertTextOnLineAfterDiagnosticCodeAction,
+    code_action_params: CodeActionParams,
+    diagnostic: Diagnostic,
+) -> Iterable[Union[CodeAction, Command]]:
+    corrected_value = code_action_data["text_to_insert"]
+    line_no = diagnostic.range.end.line
+    if diagnostic.range.end.character > 0:
+        line_no += 1
+    insert_range = Range(
+        Position(
+            line_no,
+            0,
+        ),
+        Position(
+            line_no,
+            0,
+        ),
+    )
+    edit = TextEdit(
+        insert_range,
+        corrected_value,
+    )
+    yield CodeAction(
+        title=f'Insert "{corrected_value}"',
+        kind=CodeActionKind.QuickFix,
+        diagnostics=[diagnostic],
+        edit=WorkspaceEdit(
+            changes={code_action_params.text_document.uri: [edit]},
+            document_changes=[
+                TextDocumentEdit(
+                    text_document=OptionalVersionedTextDocumentIdentifier(
+                        uri=code_action_params.text_document.uri,
+                    ),
+                    edits=[edit],
                 )
             ],
         ),
@@ -126,7 +205,7 @@ def range_compatible_with_remove_line_fix(range_: Range) -> bool:
 
 
 @_code_handler_for("remove-line")
-def _correct_value_code_action(
+def _remove_line_code_action(
     _code_action_data: RemoveLineCodeAction,
     code_action_params: CodeActionParams,
     diagnostic: Diagnostic,
@@ -138,33 +217,60 @@ def _correct_value_code_action(
         )
         return
 
-    edits = [
-        TextEdit(
-            Range(
-                start=Position(
-                    line=start.line,
-                    character=0,
-                ),
-                end=Position(
-                    line=start.line + 1,
-                    character=0,
-                ),
+    edit = TextEdit(
+        Range(
+            start=Position(
+                line=start.line,
+                character=0,
             ),
-            "",
+            end=Position(
+                line=start.line + 1,
+                character=0,
+            ),
         ),
-    ]
+        "",
+    )
     yield CodeAction(
         title="Remove the line",
         kind=CodeActionKind.QuickFix,
         diagnostics=[diagnostic],
         edit=WorkspaceEdit(
-            changes={code_action_params.text_document.uri: edits},
+            changes={code_action_params.text_document.uri: [edit]},
             document_changes=[
                 TextDocumentEdit(
                     text_document=OptionalVersionedTextDocumentIdentifier(
                         uri=code_action_params.text_document.uri,
                     ),
-                    edits=edits,
+                    edits=[edit],
+                )
+            ],
+        ),
+    )
+
+
+@_code_handler_for("remove-range")
+def _remove_range_code_action(
+    code_action_data: RemoveRangeCodeAction,
+    code_action_params: CodeActionParams,
+    diagnostic: Diagnostic,
+) -> Iterable[Union[CodeAction, Command]]:
+    edit = TextEdit(
+        diagnostic.range,
+        "",
+    )
+    title = code_action_data.get("proposed_title", "Delete")
+    yield CodeAction(
+        title=title,
+        kind=CodeActionKind.QuickFix,
+        diagnostics=[diagnostic],
+        edit=WorkspaceEdit(
+            changes={code_action_params.text_document.uri: [edit]},
+            document_changes=[
+                TextDocumentEdit(
+                    text_document=OptionalVersionedTextDocumentIdentifier(
+                        uri=code_action_params.text_document.uri,
+                    ),
+                    edits=[edit],
                 )
             ],
         ),
@@ -174,12 +280,15 @@ def _correct_value_code_action(
 def provide_standard_quickfixes_from_diagnostics(
     code_action_params: CodeActionParams,
 ) -> Optional[List[Union[Command, CodeAction]]]:
-    actions = []
+    actions: List[Union[Command, CodeAction]] = []
     for diagnostic in code_action_params.context.diagnostics:
-        data = diagnostic.data
-        if not isinstance(data, list):
-            data = [data]
-        for action_suggestion in data:
+        if not isinstance(diagnostic.data, dict):
+            continue
+        data: DiagnosticData = cast("DiagnosticData", diagnostic.data)
+        quickfixes = data.get("quickfixes")
+        if quickfixes is None:
+            continue
+        for action_suggestion in quickfixes:
             if (
                 action_suggestion
                 and isinstance(action_suggestion, Mapping)

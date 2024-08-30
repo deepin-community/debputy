@@ -1,10 +1,11 @@
 import os
+from typing import Iterator
 
 import pytest
 
 
 @pytest.fixture(autouse=True)
-def workaround_debputys_own_test_suite() -> None:
+def workaround_debputys_own_test_suite() -> Iterator[None]:
     # This fixture is only required as long as the tests are run inside `debputy`'s
     # own test suite.  If you copy out a plugin + tests, you should *not* need this
     # fixture.

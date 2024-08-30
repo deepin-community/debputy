@@ -1,11 +1,6 @@
 #!/usr/bin/make -f
 
-export PERL5LIB=$(CURDIR)/lib
-export PATH:=$(CURDIR):$(PATH)
 export DEBPUTY_CMD=$(CURDIR)/debputy.sh
 
 %:
-	dh $@ --with debputy
-
-override_dh_debputy:
-	dh_debputy --plugin self-hosting-plugins/debputy-self-hosting.json
+	$(DEBPUTY_CMD) --plugin self-hosting-plugins/debputy-self-hosting.json internal-command dpkg-build-driver-run-task $@

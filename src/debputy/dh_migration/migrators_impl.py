@@ -17,19 +17,22 @@ from typing import (
     Callable,
     TypeVar,
     Dict,
+    Container,
 )
 
 from debian.deb822 import Deb822
 
 from debputy import DEBPUTY_DOC_ROOT_DIR
 from debputy.architecture_support import dpkg_architecture_table
+from debputy.commands.debputy_cmd.output import OutputStylingBase
 from debputy.deb_packaging_support import dpkg_field_list_pkg_dep
-from debputy.debhelper_emulation import (
+from debputy.dh.debhelper_emulation import (
     dhe_filedoublearray,
     DHConfigFileLine,
     dhe_pkgfile,
-    parse_drules_for_addons,
-    extract_dh_addons_from_control,
+)
+from debputy.dh.dh_assistant import (
+    read_dh_addon_sequences,
 )
 from debputy.dh_migration.models import (
     ConflictingChange,
@@ -47,6 +50,12 @@ from debputy.highlevel_manifest import (
 from debputy.installations import MAN_GUESS_FROM_BASENAME, MAN_GUESS_LANG_FROM_PATH
 from debputy.packages import BinaryPackage
 from debputy.plugin.api import VirtualPath
+from debputy.plugin.api.spec import (
+    INTEGRATION_MODE_DH_DEBPUTY_RRR,
+    INTEGRATION_MODE_DH_DEBPUTY,
+    DebputyIntegrationMode,
+    INTEGRATION_MODE_FULL,
+)
 from debputy.util import (
     _error,
     PKGVERSION_REGEX,
@@ -56,13 +65,16 @@ from debputy.util import (
     has_glob_magic,
 )
 
-MIGRATION_TARGET_DH_DEBPUTY_RRR = "dh-sequence-zz-debputy-rrr"
-MIGRATION_TARGET_DH_DEBPUTY = "dh-sequence-zz-debputy"
+
+class ContainsEverything:
+
+    def __contains__(self, item: str) -> bool:
+        return True
 
 
 # Align with debputy.py
-DH_COMMANDS_REPLACED = {
-    MIGRATION_TARGET_DH_DEBPUTY_RRR: frozenset(
+DH_COMMANDS_REPLACED: Mapping[DebputyIntegrationMode, Container[str]] = {
+    INTEGRATION_MODE_DH_DEBPUTY_RRR: frozenset(
         {
             "dh_fixperms",
             "dh_shlibdeps",
@@ -71,7 +83,7 @@ DH_COMMANDS_REPLACED = {
             "dh_builddeb",
         }
     ),
-    MIGRATION_TARGET_DH_DEBPUTY: frozenset(
+    INTEGRATION_MODE_DH_DEBPUTY: frozenset(
         {
             "dh_install",
             "dh_installdocs",
@@ -123,6 +135,7 @@ DH_COMMANDS_REPLACED = {
             "dh_builddeb",
         }
     ),
+    INTEGRATION_MODE_FULL: ContainsEverything(),
 }
 
 _GS_DOC = f"{DEBPUTY_DOC_ROOT_DIR}/GETTING-STARTED-WITH-dh-debputy.md"
@@ -229,6 +242,11 @@ DH_ADDONS_TO_PLUGINS = {
         "gnome",
         # The sequence still provides a command for the clean sequence
         remove_dh_sequence=False,
+        must_use_zz_debputy=True,
+    ),
+    "grantlee": DHSequenceMigration(
+        "grantlee",
+        remove_dh_sequence=True,
         must_use_zz_debputy=True,
     ),
     "numpy3": DHSequenceMigration(
@@ -369,7 +387,7 @@ def migrate_bash_completion(
     manifest: HighLevelManifest,
     acceptable_migration_issues: AcceptableMigrationIssues,
     feature_migration: FeatureMigration,
-    _migration_target: str,
+    _migration_target: DebputyIntegrationMode,
 ) -> None:
     feature_migration.tagline = "dh_bash-completion files"
     is_single_binary = sum(1 for _ in manifest.all_packages) == 1
@@ -432,7 +450,7 @@ def migrate_bash_completion(
                     install_as_rules.append((source, dest_basename))
 
             if install_dest_sources:
-                sources = (
+                sources: Union[List[str], str] = (
                     install_dest_sources
                     if len(install_dest_sources) > 1
                     else install_dest_sources[0]
@@ -460,7 +478,7 @@ def migrate_dh_installsystemd_files(
     manifest: HighLevelManifest,
     _acceptable_migration_issues: AcceptableMigrationIssues,
     feature_migration: FeatureMigration,
-    _migration_target: str,
+    _migration_target: DebputyIntegrationMode,
 ) -> None:
     feature_migration.tagline = "dh_installsystemd files"
     for dctrl_bin in manifest.all_packages:
@@ -493,7 +511,7 @@ def migrate_maintscript(
     manifest: HighLevelManifest,
     acceptable_migration_issues: AcceptableMigrationIssues,
     feature_migration: FeatureMigration,
-    _migration_target: str,
+    _migration_target: DebputyIntegrationMode,
 ) -> None:
     feature_migration.tagline = "dh_installdeb files"
     mutable_manifest = assume_not_none(manifest.mutable_manifest)
@@ -602,7 +620,7 @@ def migrate_install_file(
     manifest: HighLevelManifest,
     acceptable_migration_issues: AcceptableMigrationIssues,
     feature_migration: FeatureMigration,
-    _migration_target: str,
+    _migration_target: DebputyIntegrationMode,
 ) -> None:
     feature_migration.tagline = "dh_install config files"
     mutable_manifest = assume_not_none(manifest.mutable_manifest)
@@ -793,7 +811,7 @@ def migrate_installdocs_file(
     manifest: HighLevelManifest,
     acceptable_migration_issues: AcceptableMigrationIssues,
     feature_migration: FeatureMigration,
-    _migration_target: str,
+    _migration_target: DebputyIntegrationMode,
 ) -> None:
     feature_migration.tagline = "dh_installdocs config files"
     mutable_manifest = assume_not_none(manifest.mutable_manifest)
@@ -840,7 +858,7 @@ def migrate_installexamples_file(
     manifest: HighLevelManifest,
     acceptable_migration_issues: AcceptableMigrationIssues,
     feature_migration: FeatureMigration,
-    _migration_target: str,
+    _migration_target: DebputyIntegrationMode,
 ) -> None:
     feature_migration.tagline = "dh_installexamples config files"
     mutable_manifest = assume_not_none(manifest.mutable_manifest)
@@ -894,7 +912,7 @@ def migrate_installinfo_file(
     manifest: HighLevelManifest,
     acceptable_migration_issues: AcceptableMigrationIssues,
     feature_migration: FeatureMigration,
-    _migration_target: str,
+    _migration_target: DebputyIntegrationMode,
 ) -> None:
     feature_migration.tagline = "dh_installinfo config files"
     mutable_manifest = assume_not_none(manifest.mutable_manifest)
@@ -969,7 +987,7 @@ def migrate_installman_file(
     manifest: HighLevelManifest,
     acceptable_migration_issues: AcceptableMigrationIssues,
     feature_migration: FeatureMigration,
-    _migration_target: str,
+    _migration_target: DebputyIntegrationMode,
 ) -> None:
     feature_migration.tagline = "dh_installman config files"
     mutable_manifest = assume_not_none(manifest.mutable_manifest)
@@ -1089,7 +1107,7 @@ def migrate_not_installed_file(
     manifest: HighLevelManifest,
     acceptable_migration_issues: AcceptableMigrationIssues,
     feature_migration: FeatureMigration,
-    _migration_target: str,
+    _migration_target: DebputyIntegrationMode,
 ) -> None:
     feature_migration.tagline = "dh_missing's not-installed config file"
     mutable_manifest = assume_not_none(manifest.mutable_manifest)
@@ -1129,7 +1147,7 @@ def detect_pam_files(
     manifest: HighLevelManifest,
     _acceptable_migration_issues: AcceptableMigrationIssues,
     feature_migration: FeatureMigration,
-    _migration_target: str,
+    _migration_target: DebputyIntegrationMode,
 ) -> None:
     feature_migration.tagline = "detect dh_installpam files (min dh compat)"
     for dctrl_bin in manifest.all_packages:
@@ -1144,7 +1162,7 @@ def migrate_tmpfile(
     manifest: HighLevelManifest,
     _acceptable_migration_issues: AcceptableMigrationIssues,
     feature_migration: FeatureMigration,
-    _migration_target: str,
+    _migration_target: DebputyIntegrationMode,
 ) -> None:
     feature_migration.tagline = "dh_installtmpfiles config files"
     for dctrl_bin in manifest.all_packages:
@@ -1168,7 +1186,7 @@ def migrate_lintian_overrides_files(
     manifest: HighLevelManifest,
     acceptable_migration_issues: AcceptableMigrationIssues,
     feature_migration: FeatureMigration,
-    _migration_target: str,
+    _migration_target: DebputyIntegrationMode,
 ) -> None:
     feature_migration.tagline = "dh_lintian config files"
     for dctrl_bin in manifest.all_packages:
@@ -1192,7 +1210,7 @@ def migrate_links_files(
     manifest: HighLevelManifest,
     acceptable_migration_issues: AcceptableMigrationIssues,
     feature_migration: FeatureMigration,
-    _migration_target: str,
+    _migration_target: DebputyIntegrationMode,
 ) -> None:
     feature_migration.tagline = "dh_link files"
     mutable_manifest = assume_not_none(manifest.mutable_manifest)
@@ -1266,7 +1284,7 @@ def migrate_misspelled_readme_debian_files(
     manifest: HighLevelManifest,
     acceptable_migration_issues: AcceptableMigrationIssues,
     feature_migration: FeatureMigration,
-    _migration_target: str,
+    _migration_target: DebputyIntegrationMode,
 ) -> None:
     feature_migration.tagline = "misspelled README.Debian files"
     for dctrl_bin in manifest.all_packages:
@@ -1298,7 +1316,7 @@ def migrate_doc_base_files(
     manifest: HighLevelManifest,
     _: AcceptableMigrationIssues,
     feature_migration: FeatureMigration,
-    _migration_target: str,
+    _migration_target: DebputyIntegrationMode,
 ) -> None:
     feature_migration.tagline = "doc-base files"
     # ignore the dh_make ".EX" file if one should still be present. The dh_installdocs tool ignores it too.
@@ -1349,7 +1367,7 @@ def migrate_dh_hook_targets(
     _: HighLevelManifest,
     acceptable_migration_issues: AcceptableMigrationIssues,
     feature_migration: FeatureMigration,
-    migration_target: str,
+    migration_target: DebputyIntegrationMode,
 ) -> None:
     feature_migration.tagline = "dh hook targets"
     source_root = os.path.dirname(debian_dir.fs_path)
@@ -1401,7 +1419,7 @@ def detect_unsupported_zz_debputy_features(
     manifest: HighLevelManifest,
     acceptable_migration_issues: AcceptableMigrationIssues,
     feature_migration: FeatureMigration,
-    _migration_target: str,
+    _migration_target: DebputyIntegrationMode,
 ) -> None:
     feature_migration.tagline = "Known unsupported features"
 
@@ -1420,7 +1438,7 @@ def detect_obsolete_substvars(
     _manifest: HighLevelManifest,
     _acceptable_migration_issues: AcceptableMigrationIssues,
     feature_migration: FeatureMigration,
-    _migration_target: str,
+    _migration_target: DebputyIntegrationMode,
 ) -> None:
     feature_migration.tagline = (
         "Check for obsolete ${foo:var} variables in debian/control"
@@ -1483,39 +1501,19 @@ def detect_obsolete_substvars(
                 seen_obsolete_relationship_substvars.update(obsolete_substvars_in_field)
 
         package = p.get("Package", "(Missing package name!?)")
+        fo = feature_migration.fo
         if obsolete_fields:
             fields = ", ".join(obsolete_fields)
             feature_migration.warn(
                 f"The following relationship fields can be removed from {package}: {fields}."
-                f"  (The content in them would be applied automatically.)"
+                f"  (The content in them would be applied automatically. Note: {fo.bts('1067653')})"
             )
         if seen_obsolete_relationship_substvars:
             v = ", ".join(sorted(seen_obsolete_relationship_substvars))
             feature_migration.warn(
                 f"The following relationship substitution variables can be removed from {package}: {v}"
+                f" (Note: {fo.bts('1067653')})"
             )
-
-
-def read_dh_addon_sequences(
-    debian_dir: VirtualPath,
-) -> Optional[Tuple[Set[str], Set[str]]]:
-    ctrl_file = debian_dir.get("control")
-    if ctrl_file:
-        dr_sequences: Set[str] = set()
-        bd_sequences = set()
-
-        drules = debian_dir.get("rules")
-        if drules and drules.is_file:
-            with drules.open() as fd:
-                parse_drules_for_addons(fd, dr_sequences)
-
-        with ctrl_file.open() as fd:
-            ctrl = list(Deb822.iter_paragraphs(fd))
-        source_paragraph = ctrl[0] if ctrl else {}
-
-        extract_dh_addons_from_control(source_paragraph, bd_sequences)
-        return bd_sequences, dr_sequences
-    return None
 
 
 def detect_dh_addons_zz_debputy_rrr(
@@ -1523,7 +1521,7 @@ def detect_dh_addons_zz_debputy_rrr(
     _manifest: HighLevelManifest,
     _acceptable_migration_issues: AcceptableMigrationIssues,
     feature_migration: FeatureMigration,
-    _migration_target: str,
+    _migration_target: DebputyIntegrationMode,
 ) -> None:
     feature_migration.tagline = "Check for dh-sequence-addons"
     r = read_dh_addon_sequences(debian_dir)
@@ -1534,7 +1532,7 @@ def detect_dh_addons_zz_debputy_rrr(
         )
         return
 
-    bd_sequences, dr_sequences = r
+    bd_sequences, dr_sequences, _ = r
 
     remaining_sequences = bd_sequences | dr_sequences
     saw_dh_debputy = "zz-debputy-rrr" in remaining_sequences
@@ -1543,12 +1541,31 @@ def detect_dh_addons_zz_debputy_rrr(
         feature_migration.warn("Missing Build-Depends on dh-sequence-zz-debputy-rrr")
 
 
-def detect_dh_addons(
+def detect_dh_addons_with_full_integration(
+    _debian_dir: VirtualPath,
+    _manifest: HighLevelManifest,
+    _acceptable_migration_issues: AcceptableMigrationIssues,
+    feature_migration: FeatureMigration,
+    _migration_target: DebputyIntegrationMode,
+) -> None:
+    feature_migration.tagline = "Check for dh-sequence-addons and Build-Depends"
+    feature_migration.warn(
+        "TODO: Not implemented: Please remove any dh-sequence Build-Dependency"
+    )
+    feature_migration.warn(
+        "TODO: Not implemented: Please ensure there is a Build-Dependency on `debputy (>= 0.1.45~)"
+    )
+    feature_migration.warn(
+        "TODO: Not implemented: Please ensure there is a Build-Dependency on `dpkg-dev (>= 1.22.7~)"
+    )
+
+
+def detect_dh_addons_with_zz_integration(
     debian_dir: VirtualPath,
     _manifest: HighLevelManifest,
     acceptable_migration_issues: AcceptableMigrationIssues,
     feature_migration: FeatureMigration,
-    _migration_target: str,
+    _migration_target: DebputyIntegrationMode,
 ) -> None:
     feature_migration.tagline = "Check for dh-sequence-addons"
     r = read_dh_addon_sequences(debian_dir)
@@ -1560,7 +1577,9 @@ def detect_dh_addons(
         )
         return
 
-    bd_sequences, dr_sequences = r
+    assert _migration_target != INTEGRATION_MODE_FULL
+
+    bd_sequences, dr_sequences, _ = r
 
     remaining_sequences = bd_sequences | dr_sequences
     saw_dh_debputy = (

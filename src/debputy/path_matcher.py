@@ -161,7 +161,7 @@ class MatchRule:
             _error(
                 f'The pattern "{path_or_glob}" (defined in {definition_source}) looks like it contains a'
                 f' brace expansion (such as "{{a,b}}" or "{{a..b}}").  Brace expansions are not supported.'
-                " If you wanted to match the literal path a brace in it, please use a substitution to insert"
+                " If you wanted to match the literal path with a brace in it, please use a substitution to insert"
                 f' the opening brace.  As an example: "{replacement}"'
             )
 
@@ -229,7 +229,9 @@ class MatchAnything(MatchRule):
     def _full_pattern(self) -> str:
         return "**/*"
 
-    def finditer(self, fs_root: VP, *, ignore_paths=None) -> Iterable[VP]:
+    def finditer(
+        self, fs_root: VP, *, ignore_paths: Optional[Callable[[VP], bool]] = None
+    ) -> Iterable[VP]:
         if ignore_paths is not None:
             yield from (p for p in fs_root.all_paths() if not ignore_paths(p))
         yield from fs_root.all_paths()
@@ -253,7 +255,9 @@ class ExactFileSystemPath(MatchRule):
     def _full_pattern(self) -> str:
         return self._path
 
-    def finditer(self, fs_root: VP, *, ignore_paths=None) -> Iterable[VP]:
+    def finditer(
+        self, fs_root: VP, *, ignore_paths: Optional[Callable[[VP], bool]] = None
+    ) -> Iterable[VP]:
         p = _lookup_path(fs_root, self._path)
         if p is not None and (ignore_paths is None or not ignore_paths(p)):
             yield p
@@ -376,7 +380,12 @@ class BasenameGlobMatch(MatchRule):
             return f"{self._directory}/{maybe_recursive}{self._basename_glob}"
         return self._basename_glob
 
-    def finditer(self, fs_root: VP, *, ignore_paths=None) -> Iterable[VP]:
+    def finditer(
+        self,
+        fs_root: VP,
+        *,
+        ignore_paths: Optional[Callable[[VP], bool]] = None,
+    ) -> Iterable[VP]:
         search_root = fs_root
         if self._directory is not None:
             p = _lookup_path(fs_root, self._directory)
@@ -466,7 +475,12 @@ class GenericGlobImplementation(MatchRule):
     def _full_pattern(self) -> str:
         return self._glob_pattern
 
-    def finditer(self, fs_root: VP, *, ignore_paths=None) -> Iterable[VP]:
+    def finditer(
+        self,
+        fs_root: VP,
+        *,
+        ignore_paths: Optional[Callable[[VP], bool]] = None,
+    ) -> Iterable[VP]:
         search_history = [fs_root]
         for part in self._match_parts:
             next_layer = itertools.chain.from_iterable(

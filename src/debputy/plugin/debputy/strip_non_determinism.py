@@ -70,10 +70,10 @@ class ExtensionPlusFileOutputRule(SndDetectionRule):
     def file_output_verdict(
         self,
         path: VirtualPath,
-        file_analysis: str,
+        file_analysis: Optional[str],
     ) -> bool:
         file_pattern = self.file_pattern
-        assert file_pattern is not None
+        assert file_pattern is not None and file_analysis is not None
         m = file_pattern.search(file_analysis)
         return m is not None
 

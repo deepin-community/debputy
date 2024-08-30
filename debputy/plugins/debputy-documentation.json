@@ -46,6 +46,13 @@
       "file-categories": ["maint-config"]
     },
     {
+      "path": "debian/lintian-brush.conf",
+      "documentation-uris": [
+        "man:lintian-brush.conf(5)"
+      ],
+      "file-categories": ["maint-config"]
+    },
+    {
       "path": "debian/source/options",
       "documentation-uris": [
         "man:dpkg-source(1)"

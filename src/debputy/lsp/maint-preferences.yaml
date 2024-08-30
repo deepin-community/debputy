@@ -1,0 +1,69 @@
+formatting:
+  # Like Python's `black`; enforce a style and let me focus on more important matters
+  # Based on the numbers in #895570.
+  #
+  # Note that like Python's `black`, this is a moving target and it will evolve over time.
+  black:
+    deb822:
+      short-indent: true
+      always-wrap: true
+      trailing-separator: true
+      normalize-field-content: true
+      max-line-length: 79
+      # Latest evaluation on normalize-stanza order
+      # -> https://salsa.debian.org/debian/debputy/-/issues/91#note_492437
+      normalize-stanza-order: false
+      # Not yet implemented:
+      #  normalize-field-order: true
+
+maintainer-rules:
+
+  niels@thykier.net:
+    canonical-name: Niels Thykier
+    formatting: black
+
+  zeha@debian.org:
+    canonical-name: Chris Hofstaedtler
+    formatting: black
+
+  elbrus@debian.org:
+    canonical-name: Paul Gevers
+    formatting: black
+
+  packages@qa.debian.org:
+    canonical-name: Debian QA Group
+    is-packaging-team: true  # ish; it is for `debputy` definition
+
+
+  # Add ad-hoc single package maintainer teams below here (like foo@packages.debian.org)
+  #
+  # For these avoid setting "canonical-name": Since the maintainer is only used in one
+  # package, there is no value gain in debputy trying to remind other people how it's name
+  # is spelled (instead, it would just make `debputy` annoying if the name is ever changed)
+  #
+  # Note this should ideally just use `X-Style: black` if they use a style that can be
+  # put in `X-Style: black`.
+
+  util-linux@packages.debian.org:
+    # Omitting canonical name for single use ad-hoc team maintainer name
+    formatting: black
+    is-packaging-team: true
+
+  wtmpdb@packages.debian.org:
+    # Omitting canonical name for single use ad-hoc team maintainer name
+    formatting: black
+    is-packaging-team: true
+
+  pdns@packages.debian.org:
+    # Omitting canonical name for single use ad-hoc team maintainer name
+    formatting: black
+    is-packaging-team: true
+
+  pdns-recursor@packages.debian.org:
+    # Omitting canonical name for single use ad-hoc team maintainer name
+    formatting: black
+    is-packaging-team: true
+
+  dnsdist@packages.debian.org:
+    # Omitting canonical name for single use ad-hoc team maintainer name
+    formatting: black

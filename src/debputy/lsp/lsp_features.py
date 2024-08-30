@@ -1,20 +1,33 @@
 import collections
+import dataclasses
 import inspect
 import sys
-from typing import Callable, TypeVar, Sequence, Union, Dict, List, Optional
+from typing import (
+    Callable,
+    TypeVar,
+    Sequence,
+    Union,
+    Dict,
+    List,
+    Optional,
+    AsyncIterator,
+    Self,
+    Generic,
+)
 
-from lsprotocol.types import (
+from debputy.commands.debputy_cmd.context import CommandContext
+from debputy.commands.debputy_cmd.output import _output_styling
+from debputy.lsp.lsp_self_check import LSP_CHECKS
+from debputy.lsprotocol.types import (
     TEXT_DOCUMENT_WILL_SAVE_WAIT_UNTIL,
     TEXT_DOCUMENT_CODE_ACTION,
     DidChangeTextDocumentParams,
     Diagnostic,
     DidOpenTextDocumentParams,
     SemanticTokensLegend,
+    TEXT_DOCUMENT_FORMATTING,
+    SemanticTokenTypes,
 )
-
-from debputy.commands.debputy_cmd.context import CommandContext
-from debputy.commands.debputy_cmd.output import _output_styling
-from debputy.lsp.lsp_self_check import LSP_CHECKS
 
 try:
     from pygls.server import LanguageServer
@@ -29,23 +42,74 @@ from debputy.lsp.text_util import on_save_trim_end_of_line_whitespace
 C = TypeVar("C", bound=Callable)
 
 SEMANTIC_TOKENS_LEGEND = SemanticTokensLegend(
-    token_types=["keyword", "enumMember"],
+    token_types=[
+        SemanticTokenTypes.Keyword.value,
+        SemanticTokenTypes.EnumMember.value,
+        SemanticTokenTypes.Comment.value,
+        SemanticTokenTypes.String.value,
+    ],
     token_modifiers=[],
 )
 SEMANTIC_TOKEN_TYPES_IDS = {
     t: idx for idx, t in enumerate(SEMANTIC_TOKENS_LEGEND.token_types)
 }
 
-DIAGNOSTIC_HANDLERS = {}
+DiagnosticHandler = Callable[
+    [
+        "DebputyLanguageServer",
+        Union["DidOpenTextDocumentParams", "DidChangeTextDocumentParams"],
+    ],
+    AsyncIterator[Optional[List[Diagnostic]]],
+]
+
+DIAGNOSTIC_HANDLERS: Dict[
+    str,
+    List["_DispatchRule[DiagnosticHandler]"],
+] = {}
 COMPLETER_HANDLERS = {}
 HOVER_HANDLERS = {}
 CODE_ACTION_HANDLERS = {}
 FOLDING_RANGE_HANDLERS = {}
 SEMANTIC_TOKENS_FULL_HANDLERS = {}
 WILL_SAVE_WAIT_UNTIL_HANDLERS = {}
+FORMAT_FILE_HANDLERS = {}
+TEXT_DOC_INLAY_HANDLERS = {}
 _ALIAS_OF = {}
 
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class LanguageDispatch:
+    language_id: Optional[str]
+    filename_selector: Optional[Union[str, Callable[[str], bool]]] = None
+
+    @classmethod
+    def from_language_id(
+        cls,
+        language_id: str,
+        filename_selector: Optional[Union[str, Callable[[str], bool]]] = None,
+    ) -> Self:
+        return cls(language_id, filename_selector=filename_selector)
+
+    def filename_match(self, filename: str) -> bool:
+        selector = self.filename_selector
+        if selector is None:
+            return True
+        if isinstance(selector, str):
+            return filename == selector
+        return selector(filename)
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class _DispatchRule(Generic[C]):
+    language_dispatch: LanguageDispatch
+    handler: C
+
+
 _STANDARD_HANDLERS = {
+    TEXT_DOCUMENT_FORMATTING: (
+        FORMAT_FILE_HANDLERS,
+        on_save_trim_end_of_line_whitespace,
+    ),
     TEXT_DOCUMENT_CODE_ACTION: (
         CODE_ACTION_HANDLERS,
         lambda ls, params: provide_standard_quickfixes_from_diagnostics(params),
@@ -58,7 +122,7 @@ _STANDARD_HANDLERS = {
 
 
 def lint_diagnostics(
-    file_formats: Union[str, Sequence[str]]
+    file_formats: Union[LanguageDispatch, Sequence[LanguageDispatch]]
 ) -> Callable[[LinterImpl], LinterImpl]:
 
     def _wrapper(func: C) -> C:
@@ -79,18 +143,25 @@ def lint_diagnostics(
             raise ValueError("Linters are all non-async at the moment")
 
         for file_format in file_formats:
-            if file_format in DIAGNOSTIC_HANDLERS:
+            if file_format.language_id in DIAGNOSTIC_HANDLERS:
                 raise AssertionError(
                     "There is already a diagnostics handler for " + file_format
                 )
-            DIAGNOSTIC_HANDLERS[file_format] = _lint_wrapper
+            handler_metadata = _DispatchRule(file_format, _lint_wrapper)
+            handlers = DIAGNOSTIC_HANDLERS.get(file_format.language_id)
+            if handlers is None:
+                DIAGNOSTIC_HANDLERS[file_format.language_id] = [handler_metadata]
+            else:
+                handlers.append(handler_metadata)
 
         return func
 
     return _wrapper
 
 
-def lsp_diagnostics(file_formats: Union[str, Sequence[str]]) -> Callable[[C], C]:
+def lsp_diagnostics(
+    file_formats: Union[LanguageDispatch, Sequence[LanguageDispatch]]
+) -> Callable[[C], C]:
 
     def _wrapper(func: C) -> C:
 
@@ -115,25 +186,51 @@ def lsp_diagnostics(file_formats: Union[str, Sequence[str]]) -> Callable[[C], C]
     return _wrapper
 
 
-def lsp_completer(file_formats: Union[str, Sequence[str]]) -> Callable[[C], C]:
+def lsp_completer(
+    file_formats: Union[LanguageDispatch, Sequence[LanguageDispatch]]
+) -> Callable[[C], C]:
     return _registering_wrapper(file_formats, COMPLETER_HANDLERS)
 
 
-def lsp_hover(file_formats: Union[str, Sequence[str]]) -> Callable[[C], C]:
+def lsp_hover(
+    file_formats: Union[LanguageDispatch, Sequence[LanguageDispatch]]
+) -> Callable[[C], C]:
     return _registering_wrapper(file_formats, HOVER_HANDLERS)
 
 
-def lsp_folding_ranges(file_formats: Union[str, Sequence[str]]) -> Callable[[C], C]:
+def lsp_text_doc_inlay_hints(
+    file_formats: Union[LanguageDispatch, Sequence[LanguageDispatch]]
+) -> Callable[[C], C]:
+    return _registering_wrapper(file_formats, TEXT_DOC_INLAY_HANDLERS)
+
+
+def lsp_folding_ranges(
+    file_formats: Union[LanguageDispatch, Sequence[LanguageDispatch]]
+) -> Callable[[C], C]:
     return _registering_wrapper(file_formats, FOLDING_RANGE_HANDLERS)
 
 
+def lsp_will_save_wait_until(
+    file_formats: Union[LanguageDispatch, Sequence[LanguageDispatch]]
+) -> Callable[[C], C]:
+    return _registering_wrapper(file_formats, WILL_SAVE_WAIT_UNTIL_HANDLERS)
+
+
+def lsp_format_document(
+    file_formats: Union[LanguageDispatch, Sequence[LanguageDispatch]]
+) -> Callable[[C], C]:
+    return _registering_wrapper(file_formats, FORMAT_FILE_HANDLERS)
+
+
 def lsp_semantic_tokens_full(
-    file_formats: Union[str, Sequence[str]]
+    file_formats: Union[LanguageDispatch, Sequence[LanguageDispatch]]
 ) -> Callable[[C], C]:
     return _registering_wrapper(file_formats, SEMANTIC_TOKENS_FULL_HANDLERS)
 
 
-def lsp_standard_handler(file_formats: Union[str, Sequence[str]], topic: str) -> None:
+def lsp_standard_handler(
+    file_formats: Union[LanguageDispatch, Sequence[LanguageDispatch]], topic: str
+) -> None:
     res = _STANDARD_HANDLERS.get(topic)
     if res is None:
         raise ValueError(f"No standard handler for {topic}")
@@ -144,7 +241,8 @@ def lsp_standard_handler(file_formats: Union[str, Sequence[str]], topic: str) ->
 
 
 def _registering_wrapper(
-    file_formats: Union[str, Sequence[str]], handler_dict: Dict[str, C]
+    file_formats: Union[LanguageDispatch, Sequence[LanguageDispatch]],
+    handler_dict: Dict[str, C],
 ) -> Callable[[C], C]:
     def _wrapper(func: C) -> C:
         _register_handler(file_formats, handler_dict, func)
@@ -154,11 +252,11 @@ def _registering_wrapper(
 
 
 def _register_handler(
-    file_formats: Union[str, Sequence[str]],
-    handler_dict: Dict[str, C],
+    file_formats: Union[LanguageDispatch, Sequence[LanguageDispatch]],
+    handler_dict: Dict[str, List[_DispatchRule[C]]],
     handler: C,
 ) -> None:
-    if isinstance(file_formats, str):
+    if isinstance(file_formats, LanguageDispatch):
         file_formats = [file_formats]
     else:
         if not file_formats:
@@ -166,13 +264,18 @@ def _register_handler(
         main = file_formats[0]
         for alias in file_formats[1:]:
             if alias not in _ALIAS_OF:
-                _ALIAS_OF[alias] = main
+                _ALIAS_OF[alias.language_id] = main.language_id
 
     for file_format in file_formats:
         if file_format in handler_dict:
             raise AssertionError(f"There is already a handler for {file_format}")
 
-        handler_dict[file_format] = handler
+        handler_metadata = _DispatchRule(file_format, handler)
+        handlers = handler_dict.get(file_format.language_id)
+        if handlers is None:
+            handler_dict[file_format.language_id] = [handler_metadata]
+        else:
+            handlers.append(handler_metadata)
 
 
 def ensure_lsp_features_are_loaded() -> None:
@@ -196,6 +299,8 @@ def describe_lsp_features(context: CommandContext) -> None:
         ("folding ranges", FOLDING_RANGE_HANDLERS),
         ("semantic tokens", SEMANTIC_TOKENS_FULL_HANDLERS),
         ("on-save handler", WILL_SAVE_WAIT_UNTIL_HANDLERS),
+        ("inlay hint (doc)", TEXT_DOC_INLAY_HANDLERS),
+        ("format file handler", FORMAT_FILE_HANDLERS),
     ]
     print("LSP language IDs and their features:")
     all_ids = sorted(set(lid for _, t in feature_list for lid in t))
@@ -223,18 +328,23 @@ def describe_lsp_features(context: CommandContext) -> None:
     print("General features:")
     for self_check in LSP_CHECKS:
         is_ok = self_check.test()
-        assert not self_check.is_mandatory or is_ok
-        if self_check.is_mandatory:
-            continue
         if is_ok:
             print(f" * {self_check.feature}: {fo.colored('enabled', fg='green')}")
         else:
-            disabled = fo.colored(
-                "disabled",
-                fg="yellow",
-                bg="black",
-                style="bold",
-            )
+            if self_check.is_mandatory:
+                disabled = fo.colored(
+                    "missing",
+                    fg="red",
+                    bg="black",
+                    style="bold",
+                )
+            else:
+                disabled = fo.colored(
+                    "disabled",
+                    fg="yellow",
+                    bg="black",
+                    style="bold",
+                )
 
             if self_check.how_to_fix:
                 print(f" * {self_check.feature}: {disabled}")

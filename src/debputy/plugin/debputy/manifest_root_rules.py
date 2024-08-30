@@ -12,18 +12,22 @@ from debputy._manifest_constants import (
 )
 from debputy.exceptions import DebputySubstitutionError
 from debputy.installations import InstallRule
-from debputy.manifest_parser.base_types import DebputyParsedContent
+from debputy.manifest_parser.tagging_types import DebputyParsedContent
 from debputy.manifest_parser.exceptions import ManifestParseException
 from debputy.manifest_parser.parser_data import ParserContextData
 from debputy.manifest_parser.util import AttributePath
 from debputy.plugin.api import reference_documentation
 from debputy.plugin.api.impl import DebputyPluginInitializerProvider
-from debputy.plugin.api.impl_types import (
+from debputy.plugin.api.parser_tables import (
     OPARSER_MANIFEST_ROOT,
     OPARSER_MANIFEST_DEFINITIONS,
-    SUPPORTED_DISPATCHABLE_OBJECT_PARSERS,
     OPARSER_PACKAGES,
 )
+from debputy.plugin.api.spec import (
+    not_integrations,
+    INTEGRATION_MODE_DH_DEBPUTY_RRR,
+)
+from debputy.plugin.debputy.build_system_rules import register_build_system_rules
 from debputy.substitution import VariableNameState, SUBST_VAR_RE
 
 if TYPE_CHECKING:
@@ -110,6 +114,9 @@ def register_manifest_root_rules(api: DebputyPluginInitializerProvider) -> None:
         MK_INSTALLATIONS,
         List[InstallRule],
         _handle_installation_rules,
+        expected_debputy_integration_mode=not_integrations(
+            INTEGRATION_MODE_DH_DEBPUTY_RRR
+        ),
         inline_reference_documentation=reference_documentation(
             title="Installations",
             description=textwrap.dedent(
@@ -163,6 +170,8 @@ def register_manifest_root_rules(api: DebputyPluginInitializerProvider) -> None:
         nested_in_package_context=True,
     )
 
+    register_build_system_rules(api)
+
 
 class ManifestVersionFormat(DebputyParsedContent):
     manifest_version: ManifestVersion
@@ -209,13 +218,13 @@ def _handle_manifest_variables(
         key_path = variables_path[key]
         if not SUBST_VAR_RE.match("{{" + key + "}}"):
             raise ManifestParseException(
-                f"The variable at {key_path.path} has an invalid name and therefore cannot"
+                f"The variable at {key_path.path_key_lc} has an invalid name and therefore cannot"
                 " be used."
             )
         if substitution.variable_state(key) != VariableNameState.UNDEFINED:
             raise ManifestParseException(
                 f'The variable "{key}" is already reserved/defined. Error triggered by'
-                f" {key_path.path}."
+                f" {key_path.path_key_lc}."
             )
         try:
             value = substitution.substitute(value_raw, key_path.path)

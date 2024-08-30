@@ -14,7 +14,9 @@ B<debputy> B<check-manifest> [B<--debputy-manifest=>I<path/to/debputy.manifest>]
 
 B<debputy> B<annotate-packaging-files>
 
-B<debputy> B<lint>
+B<debputy> B<lint> [--auto-fix]
+
+B<debputy> B<reformat> [--no-auto-fix]
 
 B<debputy> B<lsp> B<editor-config> B<NAME>
 
@@ -117,6 +119,86 @@ The B<--no-act> is an alias of B<--no-apply-changes> to match the name that B<de
 
 =back
 
+=item reformat
+
+I<< Note: This subcommand needs optional dependencies to work from B<Recommends> or B<Suggests> >>
+
+Apply the formatting style on the packaging files.
+
+This is the same style that B<debputy lsp server> would have applied if requested to reformat the files.
+
+The B<debputy> tool reacts to having a B<X-Style> field in F<debian/control> from where you can pick
+a named style. The recommended style is B<black>, which is named such to match the B<black> code formatter
+for B<Python> (which imposes a style that evolves over time).
+
+For packages that does not have the B<X-Style> field, B<debputy> will result to looking up the maintainer
+(and possibly co-maintainers) for known style preferences in its built-in configuration. If B<debputy>
+can derive a style that all parties would agree too (or the team style for packaging teams), then that
+style will be used.
+
+The B<black> style started as similar to that of B<wrap-and-sort -ast>, since that was one of the most
+common styles according to L<https://bugs.debian.org/895570>, but the style is expected to evolve over
+time and the two styles may diverge over time.
+
+The command accepts the following options:
+
+=over 4
+
+=item B<--style=black>
+
+Override the package style and use the B<black> style. Any auto-detection or B<X-Style> setting will
+be ignored.
+
+=item B<--auto-fix>, B<--no-auto-fix>
+
+Decide whether any changes should be fixed automatically.
+
+Either way, a difference (B<diff -u>) is displayed to stdout if any changes were detected.
+
+=item B<--linter-exit-code>, B<--no-linter-exit-code>
+
+There is a convention among linter tools to return a non-zero exit code for "issues".  The
+B<--linter-exit-code> will enforce this behaviour while the B<--no-linter-exit-code> will disable
+it.
+
+The B<debputy> program will use exit code B<2> for "issues" as a "linter exit code" when
+linting based exit codes are active.
+
+Not having a linter based exit code can be useful if you want to run the tool programmatically
+to perform the action and you only want the exit code to tell whether there was a problem
+providing the results.
+
+If you rely on the exit code, you are recommended to explicitly pass the relevant variant of the
+flag even if the current default matches your wishes.
+
+=item B<--unknown-or-unsupported-style-is-ok>, B<--missing-style-is-ok>
+
+By default, B<debputy reformat> will exit with an error when it cannot determine which style to
+use. This is generally what you want for "per package" CI or other lint checks to inform you that
+the reformatting will not work.
+
+However, for "cross package" pipelines, like the default Debian Salsa CI pipeline, having
+B<debputy reformat> automatically work when a style is set and doing nothing otherwise is
+preferable, since the pipeline can then provide a B<debputy reformat> job for all consumers
+without worrying about breaking their pipelines.
+
+It can also be useful for scripts or automated mass-edits where you want B<debputy> to fixup
+the changes you did if there is a known style without being hampered by the packages that
+have no known style.
+
+The B<--missing-style-is-ok> is a deprecated name since it does not correctly imply that
+unsupported styles are also considered ok.
+
+=item B<--supported-style-is-required>
+
+Exit with an error if no supported style can be found. This is the default behaviour but
+this option can be used to override settings to disable it. The error does not distinguish
+between no style found or an unsupported style found (both lead to an error).
+
+If you rely on the exit code, please set this option explicitly.
+
+=back
+
 =item lint
 
 I<< Note: This subcommand needs optional dependencies to work from B<Recommends> or B<Suggests> >>
@@ -125,6 +207,12 @@ Run the linting tooling for Debian packaging files.  This will run a linter to c
 files. This command is useful for CI or for when you cannot use the language server feature. It provides
 the same diagnostics as B<debputy lsp server> would but without requiring an LSP capable editor as intermediate.
 The output is only intended for human consumption.  Machine readable is not a goal at this time.
+
+The B<debputy lint> command is a form of static analysis and will not load nor execute code from the
+code it is scanning. It is a security bug for B<debputy lint> to violate this principle directly
+or indirectly. Therefore, B<debputy> can only provide diagnostics from libraries and tools that takes
+this principle seriously. It also means that B<debputy> will likely have false-positives for self-hosting
+code, since it is not allowed to load the self-hosted code.
 
 Note that at the time of writing, the B<debputy.manifest> file is only B<partially> supported. If you
 have F<debian/debputy.manifest>, please also run B<debputy check-manifest> to get more thorough checks
@@ -165,6 +253,30 @@ providing the results.
 
 If you rely on the exit code, you are recommended to explicitly pass the relevant variant of the
 flag even if the current default matches your wishes.
+
+=item B<--lint-report-format> I<term|junit-xml>
+
+Choose the output format of the resulting report. The B<term> report is a terminal output report.
+The B<junit-xml> writes the output to an XML in a JUnit 4 format (should be compatible with
+the xunit2 family of JUnit4 style input). This is useful for GitLab CI pipelines to get the
+results imported via GitLab's B<junit> CI pipeline feature.
+
+=item B<--report-output> I<DEST>
+
+For reports that generate file system artifacts, choose where the output should be placed.
+
+Ignored with a warning for formats that do not generate file system outputs such as the
+B<term> report format.
+
+=item B<--warn-about-check-manifest>, B<--no-warn-about-check-manifest>
+
+Whether B<debputy lint> should remind you that it has short comings in regards to validating
+the B<debian/debputy.manifest> file. The warning will only appear if the manifest file exists.
+That is, the options have no effect either way when the file is not present.
+
+The B<--no-warn-about-check-manifest> is mostly used for generic pipelines that separately
+call B<debputy check-manifest> to ensure that the manifest is also validated or for cases
+where the limitation is known and accepted.
 
 =back
 
@@ -229,6 +341,21 @@ B<debputy lsp server> will suffice (using the stdio transport). See B<debputy ls
 for other integration options such as TCP (B<--tcp>) or websocket (B<--ws>) plus related supporting
 options.
 
+The B<debputy lsp server> command provides several features including a form of static analysis in the
+form of "as-you-type" diagnostics. For the diagnostics, is B<debputy lsp server> not allowed load nor
+execute code from the code it is scanning. It is a security bug for B<debputy lsp server> to violate
+this principle directly or indirectly. Therefore, B<debputy> can only provide diagnostics from libraries
+and tools that takes this principle seriously. It also means that B<debputy> will likely have
+false-positives for self-hosting code, since it is not allowed to load the self-hosted code.
+
+This security principle also applies to hover docs, completion suggestions and other trivial code editing
+or viewing features. However, it is not universal, since certain LSP features are deliberately designed
+to run the code you are viewing. As an example, B<debputy lsp server> can provide a "code lens" (LSP term)
+for building the current package. On activation of the code lens, B<debputy> will trigger code from the
+package to be run and that is expected. The critical points here are that the user most explicitly
+trigger the feature and it must use terms commonly associated with running code such as B<build>,
+B<run> or B<execute> (non-exhaustive list).
+
 If you need to debug an issue with the language server, the TCP integration (B<--tcp>) can be
 quite helpful. In this mode, you run B<debputy lsp server --tcp> in a terminal before starting your
 editor. This means you have direct and unfiltered access to the B<debputy> command and its output.
@@ -242,37 +369,61 @@ known variations such as B<debian-control> (as used by B<eglot> from B<emacs>) a
 B<debcontrol> (as used by B<vim>). See B<debputy lsp features> for a list of known language IDs
 along with their aliases.
 
-When properly set up, the language server will offer a variety of features such as:
+When properly set up, the language server will offer a variety of features such as completion
+suggestions, hover documentation, "as you type" diagnostics, quickfixes, etc.  Please see
+B<debputy lsp features> for the full list of features per format. That command will also
+help identify mandatory and optional dependencies for the B<debputy lsp server> command.
+
+Note many of the features are subject to the editor supporting them, correct language IDs being
+passed to B<debputy>, etc.
+
+Options for this subcommand
 
 =over 4
 
-=item -
+=item B<--ignore-language-ids>
 
-Completion suggestion such as field names or values in deb822 based files.
+When provided, B<debputy> will ignore any language ID that the editor provides for any file. Instead, B<debputy>
+will only rely on the file name for determining how to interpret the file content.
 
-=item -
+Since B<debputy> supports multiple file formats, it is needs to know what kind of file it is working with. The
+editor is supposed to provide this via a "Language ID" attribute. This enables you as a user in the editor
+to override the file format and have proper editor support no matter the filename. Unfortunately, most Debian
+packaging files do not have a language ID assigned in the LSP specification, so editors either provide a
+custom language ID or no custom language ID at all (that is, an empty string).
 
-Hover documentation for fields in deb822-based files.
+When the editor does not provide a language ID for file, B<debputy> will since 0.1.25 automatically attempt
+to derive the language from the filename. With this option (introduced in 0.1.29), B<debputy> will always
+derive the language from the filename even if the editor provided a language ID. This can be helpful if your
+editor is providing language IDs that B<debputy> does not recognize.
 
-=item -
+As an example, in B<emacs> with B<eglot> the language ID is derived from the name of the buffer's major mode. If
+you tried to use B<debputy lsp server> with a major mode that B<debputy> does not recognize then without this
+option, B<debputy> would "silently" do nothing. With this option, it would have worked provided the filename
+matched B<debputy>'s expectation no matter the major mode.
 
-Diagnostics ("linting"). In many cases, B<debputy> will also provide quickfixes for the issues.
+On the downside, B<debputy> will not provide correct advice unless the paths matches F<< .../debian/I<filename> >>.
+This can provide issues with some setups where the debian directory is implicit such as some "packaging-only" repos
+or some editor scratch pads.
 
-This feature is also (partly) available via the B<debputy lint> command. The primary limitation
-in B<debputy lint> is that you cannot interactively choose which quickfix to apply.
+=item B<--tcp> or B<--ws>
 
-=item -
+By default, the B<debputy> language server will use B<stdio> for communication with the editor. These options provide
+either the TCP integration mode (B<--tcp>) or the websocket integration mode (B<--ws>). In this mode, the B<--host>
+and B<--port> options can be used to choose the bind address.
 
-On save actions (currently only "prune trailing whitespace").
+These options are mutually exclusive.
 
-=item -
+The B<--ws> option requires B<python3-websockets> Debian package.
 
-Folding ranges (multi-line comments).
+=item B<--host> I<HOSTNAME>, B<--port> I<PORT>
+
+With B<--tcp> or B<--ws>, these option determines the bind address. The default is 127.0.0.1 for host and 2087 for
+the port.
+
+In integration modes that does not need a bind address (such as the B<stdio> mode), this option is ignored.
 
 =back
-
-Note these features are subject to the editor supporting them, correct language IDs being
-passed to B<debputy>, etc.
 
 =item lsp editor-config B<EDITOR>
 
@@ -340,8 +491,10 @@ config snippets. This data will be cross referenced with the plugin provided dat
 detect files that B<debputy> (and its plugins) does not know about, but it cannot provide any additional
 information.
 
-This part requires B<debhelper (>= 13.12~)> to work fully. With older versions, the output will include am
-B<issues> denoting that B<dh_assistant> returned non-zero.
+This part requires B<< debhelper (>= 13.12~) >> to work fully. With older versions, the output will include an
+B<issues> attribute denoting that B<dh_assistant> returned non-zero. Additionally, with B<< debhelper (>= 13.16~) >>
+the command will also provide data about files associated with some B<dh_>-commands not active with the
+current set of B<dh> addons.
 
 When B<dh_assistant list-guessed-dh-config-files> is missing a file, it is typically because the command
 that uses that config file is not introspectable. Typically, that can be fixed by patching the command
@@ -352,9 +505,10 @@ to include a command line a la:
 Assuming the command uses B<pkgfile($package, "foo")> from L<Debian::Debhelper::Dh_Lib> to look up the
 config file.
 
-Notable case that will never work is F<debian/foo.service> where there is no B<foo> package in
+Notable case that will likely not work is F<debian/foo.service> where there is no B<foo> package in
 F<debian/control> but F<debian/rules> calls B<dh_installsystemd --name foo>. This holds equally for
-all debhelper config files and related commands.
+all debhelper config files and related commands. Here, the resulting file (if detected at all) might
+be associated with the wrong package.
 
 =back
 

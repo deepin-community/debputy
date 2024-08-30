@@ -1,9 +1,10 @@
 import io
 import textwrap
-from typing import Iterable, Callable, Optional, List, Tuple, Sequence
+from typing import Callable, Optional, List, Tuple, Sequence
 
 import pytest
 
+from debputy.commands.debputy_cmd.output import no_fancy_output
 from debputy.dh_migration.migrators import Migrator
 from debputy.dh_migration.migrators_impl import (
     migrate_tmpfile,
@@ -15,15 +16,13 @@ from debputy.dh_migration.migrators_impl import (
     migrate_install_file,
     migrate_maintscript,
     migrate_links_files,
-    detect_dh_addons,
+    detect_dh_addons_with_zz_integration,
     migrate_not_installed_file,
     migrate_installman_file,
     migrate_bash_completion,
     migrate_installinfo_file,
     migrate_dh_installsystemd_files,
     detect_obsolete_substvars,
-    MIGRATION_TARGET_DH_DEBPUTY,
-    MIGRATION_TARGET_DH_DEBPUTY_RRR,
     detect_dh_addons_zz_debputy_rrr,
 )
 from debputy.dh_migration.models import (
@@ -34,6 +33,10 @@ from debputy.dh_migration.models import (
 from debputy.highlevel_manifest import HighLevelManifest
 from debputy.highlevel_manifest_parser import YAMLManifestParser
 from debputy.plugin.api import virtual_path_def, VirtualPath
+from debputy.plugin.api.spec import (
+    INTEGRATION_MODE_DH_DEBPUTY_RRR,
+    INTEGRATION_MODE_DH_DEBPUTY,
+)
 from debputy.plugin.api.test_api import (
     build_virtual_file_system,
 )
@@ -65,6 +68,7 @@ def manifest_parser_pkg_foo_factory(
             dpkg_arch_query,
             no_profiles_or_build_options,
             debputy_plugin_feature_set,
+            "full",
             debian_dir=debian_dir,
         )
 
@@ -94,9 +98,9 @@ def run_migrator(
     manifest: HighLevelManifest,
     acceptable_migration_issues: AcceptableMigrationIssues,
     *,
-    migration_target=MIGRATION_TARGET_DH_DEBPUTY,
+    migration_target=INTEGRATION_MODE_DH_DEBPUTY,
 ) -> FeatureMigration:
-    feature_migration = FeatureMigration(migrator.__name__)
+    feature_migration = FeatureMigration(migrator.__name__, no_fancy_output())
     migrator(
         path,
         manifest,
@@ -119,8 +123,10 @@ def _assert_unsupported_feature(
 
 
 def _write_manifest(manifest: HighLevelManifest) -> str:
+    mutable_manifest = manifest.mutable_manifest
+    assert mutable_manifest is not None
     with io.StringIO() as fd:
-        manifest.mutable_manifest.write_to(fd)
+        mutable_manifest.write_to(fd)
         return fd.getvalue()
 
 
@@ -134,7 +140,7 @@ def _verify_migrator_generates_parsable_manifest(
     expected_warnings: Optional[List[str]] = None,
     expected_renamed_paths: Optional[List[Tuple[str, str]]] = None,
     expected_removals: Optional[List[str]] = None,
-    required_plugins: Optional[Sequence[str]] = tuple(),
+    required_plugins: Sequence[str] = tuple(),
     dh_config_mode: Optional[int] = None,
 ) -> None:
     # No file, no changes
@@ -1303,7 +1309,7 @@ def test_detect_obsolete_substvars(
     )
     msg = (
         "The following relationship substitution variables can be removed from foo:"
-        " ${misc:Depends}, ${shlibs:Depends}, ${so:Depends}"
+        " ${misc:Depends}, ${shlibs:Depends}, ${so:Depends} (Note: https://bugs.debian.org/1067653)"
     )
     assert migration.anything_to_do
     assert migration.warnings == [msg]
@@ -1351,7 +1357,7 @@ def test_detect_obsolete_substvars_remove_field(
     )
     msg = (
         "The following relationship fields can be removed from foo: Pre-Depends."
-        "  (The content in them would be applied automatically.)"
+        "  (The content in them would be applied automatically. Note: https://bugs.debian.org/1067653)"
     )
     assert migration.anything_to_do
     assert migration.warnings == [msg]
@@ -1401,7 +1407,7 @@ def test_detect_obsolete_substvars_remove_field_essential(
     )
     msg = (
         "The following relationship fields can be removed from foo: Pre-Depends."
-        "  (The content in them would be applied automatically.)"
+        "  (The content in them would be applied automatically. Note: https://bugs.debian.org/1067653)"
     )
     assert migration.anything_to_do
     assert migration.warnings == [msg]
@@ -1460,7 +1466,7 @@ def test_detect_dh_addons(
     accept_no_migration_issues: AcceptableMigrationIssues,
     accept_any_migration_issues: AcceptableMigrationIssues,
 ) -> None:
-    migrator = detect_dh_addons
+    migrator = detect_dh_addons_with_zz_integration
     empty_fs = build_virtual_file_system([DEBIAN_DIR_ENTRY])
 
     dctrl_no_addons_content = textwrap.dedent(
@@ -1659,7 +1665,7 @@ def test_detect_dh_addons_rrr(
         empty_fs,
         empty_manifest_pkg_foo,
         accept_no_migration_issues,
-        migration_target=MIGRATION_TARGET_DH_DEBPUTY_RRR,
+        migration_target=INTEGRATION_MODE_DH_DEBPUTY_RRR,
     )
     assert migration.anything_to_do
     assert migration.warnings == [no_ctrl_msg]

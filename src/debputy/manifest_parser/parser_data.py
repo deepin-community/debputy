@@ -4,31 +4,28 @@ from typing import (
     Optional,
     Mapping,
     NoReturn,
-    Union,
-    Any,
     TYPE_CHECKING,
-    Tuple,
 )
 
 from debian.debian_support import DpkgArchTable
 
 from debputy._deb_options_profiles import DebBuildOptionsAndProfiles
 from debputy.architecture_support import DpkgArchitectureBuildProcessValuesTable
-from debputy.manifest_conditions import ManifestCondition
+from debputy.manifest_parser.base_types import BuildEnvironmentDefinition
 from debputy.manifest_parser.exceptions import ManifestParseException
 from debputy.manifest_parser.util import AttributePath
-from debputy.packages import BinaryPackage
-from debputy.plugin.api.impl_types import (
+from debputy.manifest_parser.util import (
     _ALL_PACKAGE_TYPES,
     resolve_package_type_selectors,
+)
+from debputy.packages import BinaryPackage
+from debputy.plugin.api.impl_types import (
     TP,
     DispatchingTableParser,
     TTP,
-    DispatchingObjectParser,
 )
-from debputy.plugin.api.spec import PackageTypeSelector
+from debputy.plugin.api.spec import PackageTypeSelector, DebputyIntegrationMode
 from debputy.substitution import Substitution
-
 
 if TYPE_CHECKING:
     from debputy.highlevel_manifest import PackageTransformationDefinition
@@ -107,7 +104,7 @@ class ParserContextData:
         raise NotImplementedError
 
     @property
-    def build_env(self) -> DebBuildOptionsAndProfiles:
+    def deb_options_and_profiles(self) -> DebBuildOptionsAndProfiles:
         raise NotImplementedError
 
     @contextlib.contextmanager
@@ -130,4 +127,13 @@ class ParserContextData:
         raise NotImplementedError
 
     def dispatch_parser_table_for(self, rule_type: TTP) -> DispatchingTableParser[TP]:
+        raise NotImplementedError
+
+    @property
+    def debputy_integration_mode(self) -> DebputyIntegrationMode:
+        raise NotImplementedError
+
+    def resolve_build_environment(
+        self, name: Optional[str], attribute_path: AttributePath
+    ) -> BuildEnvironmentDefinition:
         raise NotImplementedError

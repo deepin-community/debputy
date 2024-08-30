@@ -1,23 +1,38 @@
-Tests: debputy-py.test
-Restrictions: allow-stderr
+Tests:
+ debputy-py.test,
+Restrictions:
+ allow-stderr,
 # debputy loads the libcap2 library directly for one of the tests
-Depends: libcap2,
-         python3-all,
-         python3-lsprotocol,
-         python3-pytest,
-         @,
+Depends:
+ libcap2,
+ python3-all,
+ python3-lsprotocol,
+ python3-pytest,
+ @,
 
-Tests: debputy-cli
-Restrictions: allow-stderr, superficial
-Depends: @,
+Tests:
+ debputy-cli,
+Restrictions:
+ allow-stderr,
+ superficial,
+Depends:
+ @,
 
-Tests: debputy-cli-lint-lsp
-Restrictions: allow-stderr, superficial
-Depends: python3-lsprotocol,
-         @,
+Tests:
+ debputy-cli-lint-lsp,
+Restrictions:
+ allow-stderr,
+ superficial,
+Depends:
+ python3-lsprotocol,
+ @,
 
-Tests: debputy-cli-lsp
-Restrictions: allow-stderr, superficial
-Depends: python3-lsprotocol,
-         python3-pygls,
-         @,
+Tests:
+ debputy-cli-lsp,
+Restrictions:
+ allow-stderr,
+ superficial,
+Depends:
+ python3-lsprotocol,
+ python3-pygls,
+ @,

@@ -280,6 +280,9 @@ class Deb822ParsedTokenList(
         # type: () -> Iterator[VE]
         yield from (v for v in self._token_list if isinstance(v, self._vtype))
 
+    def iter_parts(self) -> Iterable[TokenOrElement]:
+        yield from self._token_list
+
     def _mark_changed(self):
         # type: () -> None
         self._changed = True
@@ -617,8 +620,7 @@ class Deb822ParsedTokenList(
         # type: () -> str
         return "".join(t.text for t in self._iter_content_as_tokens())
 
-    def _update_field(self):
-        # type: () -> None
+    def _generate_kvpair(self) -> "Deb822KeyValuePairElement":
         kvpair_element = self._kvpair_element
         field_name = kvpair_element.field_name
         token_list = self._token_list
@@ -666,7 +668,17 @@ class Deb822ParsedTokenList(
         assert isinstance(paragraph, Deb822NoDuplicateFieldsParagraphElement)
         new_kvpair_element = paragraph.get_kvpair_element(field_name)
         assert new_kvpair_element is not None
-        kvpair_element.value_element = new_kvpair_element.value_element
+        return new_kvpair_element
+
+    def convert_to_text(self, *, with_field_name: bool = False) -> str:
+        kvpair = self._generate_kvpair()
+        element = kvpair if with_field_name else kvpair.value_element
+        return element.convert_to_text()
+
+    def _update_field(self):
+        # type: () -> None
+        kvpair_element = self._kvpair_element
+        kvpair_element.value_element = self._generate_kvpair().value_element
         self._changed = False
 
     def sort_elements(
@@ -1082,6 +1094,14 @@ class Deb822Element(Locatable):
         return False
 
     @property
+    def is_whitespace(self) -> bool:
+        return False
+
+    @property
+    def is_separator(self) -> bool:
+        return False
+
+    @property
     def parent_element(self):
         # type: () -> Optional[Deb822Element]
         return resolve_ref(self._parent_element)
@@ -1108,12 +1128,12 @@ class Deb822Element(Locatable):
         if parent is self.parent_element:
             self._parent_element = None
 
-    def size(self, *, skip_leading_comments: bool = True) -> Range:
+    def size(self) -> Range:
         size_cache = self._full_size_cache
         if size_cache is None:
             size_cache = Range.from_position_and_sizes(
                 START_POSITION,
-                (p.size(skip_leading_comments=False) for p in self.iter_parts()),
+                (p.size() for p in self.iter_parts()),
             )
             self._full_size_cache = size_cache
         return size_cache
@@ -1136,21 +1156,21 @@ class Deb822InterpretationProxyElement(Deb822Element):
         # type: () -> Iterable[TokenOrElement]
         return iter(self.parts)
 
-    def position_in_parent(self, *, skip_leading_comments: bool = True) -> Position:
+    def position_in_parent(self) -> Position:
         parent = self.parent_element
         if parent is None:
             raise RuntimeError("parent was garbage collected")
         return parent.position_in_parent()
 
-    def position_in_file(self, *, skip_leading_comments: bool = True) -> Position:
+    def position_in_file(self) -> Position:
         parent = self.parent_element
         if parent is None:
             raise RuntimeError("parent was garbage collected")
         return parent.position_in_file()
 
-    def size(self, *, skip_leading_comments: bool = True) -> Range:
+    def size(self) -> Range:
         # Same as parent except we never use a cache.
-        sizes = (p.size(skip_leading_comments=False) for p in self.iter_parts())
+        sizes = (p.size() for p in self.iter_parts())
         return Range.from_position_and_sizes(START_POSITION, sizes)
 
 
@@ -1282,28 +1302,6 @@ class Deb822ValueLineElement(Deb822Element):
         yield from self._iter_content_parts()
         if self._newline_token:
             yield self._newline_token
-
-    def size(self, *, skip_leading_comments: bool = True) -> Range:
-        if skip_leading_comments:
-            return Range.from_position_and_sizes(
-                START_POSITION,
-                (
-                    p.size(skip_leading_comments=False)
-                    for p in self.iter_parts()
-                    if not p.is_comment
-                ),
-            )
-        return super().size(skip_leading_comments=skip_leading_comments)
-
-    def position_in_parent(self, *, skip_leading_comments: bool = True) -> Position:
-        base_pos = super().position_in_parent(skip_leading_comments=False)
-        if skip_leading_comments:
-            for p in self.iter_parts():
-                if p.is_comment:
-                    continue
-                non_comment_pos = p.position_in_parent(skip_leading_comments=False)
-                base_pos = non_comment_pos.relative_to(base_pos)
-        return base_pos
 
 
 class Deb822ValueElement(Deb822Element):
@@ -1492,29 +1490,9 @@ class Deb822KeyValuePairElement(Deb822Element):
         yield self._separator_token
         yield self._value_element
 
-    def position_in_parent(
-        self,
-        *,
-        skip_leading_comments: bool = True,
-    ) -> Position:
-        position = super().position_in_parent(skip_leading_comments=False)
-        if skip_leading_comments:
-            if self._comment_element:
-                field_pos = self._field_token.position_in_parent()
-                position = field_pos.relative_to(position)
-        return position
-
-    def size(self, *, skip_leading_comments: bool = True) -> Range:
-        if skip_leading_comments:
-            return Range.from_position_and_sizes(
-                START_POSITION,
-                (
-                    p.size(skip_leading_comments=False)
-                    for p in self.iter_parts()
-                    if not p.is_comment
-                ),
-            )
-        return super().size(skip_leading_comments=False)
+    def value_position_in_stanza(self) -> Position:
+        value_pos = self._value_element.position_in_parent()
+        return value_pos.relative_to(self.position_in_parent())
 
 
 def _format_comment(c):
@@ -3142,11 +3120,11 @@ class Deb822FileElement(Deb822Element):
         t.parent_element = self
         return t
 
-    def position_in_parent(self, *, skip_leading_comments: bool = True) -> Position:
+    def position_in_parent(self) -> Position:
         # Recursive base-case
         return START_POSITION
 
-    def position_in_file(self, *, skip_leading_comments: bool = True) -> Position:
+    def position_in_file(self) -> Position:
         # By definition
         return START_POSITION
 

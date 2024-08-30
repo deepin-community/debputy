@@ -11,6 +11,7 @@ from typing import (
     overload,
 )
 
+from debian.deb822 import Deb822
 from debian.debian_support import DpkgArchTable
 
 from ._deb_options_profiles import DebBuildOptionsAndProfiles
@@ -18,7 +19,11 @@ from .architecture_support import (
     DpkgArchitectureBuildProcessValuesTable,
     dpkg_architecture_table,
 )
-from .lsp.vendoring._deb822_repro import parse_deb822_file, Deb822ParagraphElement
+from .lsp.vendoring._deb822_repro import (
+    parse_deb822_file,
+    Deb822ParagraphElement,
+    Deb822FileElement,
+)
 from .util import DEFAULT_PACKAGE_TYPE, UDEB_PACKAGE_TYPE, _error, active_profiles_match
 
 _MANDATORY_BINARY_PACKAGE_FIELD = [
@@ -39,15 +44,15 @@ class DctrlParser:
             DpkgArchitectureBuildProcessValuesTable
         ] = None,
         dpkg_arch_query_table: Optional[DpkgArchTable] = None,
-        build_env: Optional[DebBuildOptionsAndProfiles] = None,
+        deb_options_and_profiles: Optional[DebBuildOptionsAndProfiles] = None,
         ignore_errors: bool = False,
     ) -> None:
         if dpkg_architecture_variables is None:
             dpkg_architecture_variables = dpkg_architecture_table()
         if dpkg_arch_query_table is None:
             dpkg_arch_query_table = DpkgArchTable.load_arch_table()
-        if build_env is None:
-            build_env = DebBuildOptionsAndProfiles.instance()
+        if deb_options_and_profiles is None:
+            deb_options_and_profiles = DebBuildOptionsAndProfiles.instance()
 
         # If no selection option is set, then all packages are acted on (except the
         # excluded ones)
@@ -61,14 +66,14 @@ class DctrlParser:
         self.select_arch_any = select_arch_any
         self.dpkg_architecture_variables = dpkg_architecture_variables
         self.dpkg_arch_query_table = dpkg_arch_query_table
-        self.build_env = build_env
+        self.deb_options_and_profiles = deb_options_and_profiles
         self.ignore_errors = ignore_errors
 
     @overload
     def parse_source_debian_control(
         self,
         debian_control_lines: Iterable[str],
-    ) -> Tuple["SourcePackage", Dict[str, "BinaryPackage"]]: ...
+    ) -> Tuple[Deb822FileElement, "SourcePackage", Dict[str, "BinaryPackage"]]: ...
 
     @overload
     def parse_source_debian_control(
@@ -76,21 +81,28 @@ class DctrlParser:
         debian_control_lines: Iterable[str],
         *,
         ignore_errors: bool = False,
-    ) -> Tuple[Optional["SourcePackage"], Optional[Dict[str, "BinaryPackage"]]]: ...
+    ) -> Tuple[
+        Deb822FileElement,
+        Optional["SourcePackage"],
+        Optional[Dict[str, "BinaryPackage"]],
+    ]: ...
 
     def parse_source_debian_control(
         self,
         debian_control_lines: Iterable[str],
         *,
         ignore_errors: bool = False,
-    ) -> Tuple[Optional["SourcePackage"], Optional[Dict[str, "BinaryPackage"]]]:
-        dctrl_paragraphs = list(
-            parse_deb822_file(
-                debian_control_lines,
-                accept_files_with_error_tokens=ignore_errors,
-                accept_files_with_duplicated_fields=ignore_errors,
-            )
+    ) -> Tuple[
+        Optional[Deb822FileElement],
+        Optional["SourcePackage"],
+        Optional[Dict[str, "BinaryPackage"]],
+    ]:
+        deb822_file = parse_deb822_file(
+            debian_control_lines,
+            accept_files_with_error_tokens=ignore_errors,
+            accept_files_with_duplicated_fields=ignore_errors,
         )
+        dctrl_paragraphs = list(deb822_file)
         if len(dctrl_paragraphs) < 2:
             if not ignore_errors:
                 _error(
@@ -99,7 +111,7 @@ class DctrlParser:
             source_package = (
                 SourcePackage(dctrl_paragraphs[0]) if dctrl_paragraphs else None
             )
-            return source_package, None
+            return deb822_file, source_package, None
 
         source_package = SourcePackage(dctrl_paragraphs[0])
         bin_pkgs = []
@@ -107,9 +119,16 @@ class DctrlParser:
             if ignore_errors:
                 if "Package" not in p:
                     continue
-                for f in _MANDATORY_BINARY_PACKAGE_FIELD:
-                    if f not in p:
-                        p[f] = "unknown"
+                missing_field = any(f not in p for f in _MANDATORY_BINARY_PACKAGE_FIELD)
+                if missing_field:
+                    # In the LSP context, it is problematic if we "add" fields as it ranges and provides invalid
+                    # results. However, `debputy` also needs the mandatory fields to be there, so we clone the
+                    # stanzas that `debputy` (build) will see to add missing fields.
+                    copy = Deb822(p)
+                    for f in _MANDATORY_BINARY_PACKAGE_FIELD:
+                        if f not in p:
+                            copy[f] = "unknown"
+                    p = copy
             bin_pkgs.append(
                 _create_binary_package(
                     p,
@@ -119,7 +138,7 @@ class DctrlParser:
                     self.select_arch_any,
                     self.dpkg_architecture_variables,
                     self.dpkg_arch_query_table,
-                    self.build_env,
+                    self.deb_options_and_profiles,
                     i,
                 )
             )
@@ -137,7 +156,7 @@ class DctrlParser:
                     f"The following *excluded* packages (-N) are not listed in debian/control: {sorted(unknown)}"
                 )
 
-        return source_package, bin_pkgs_table
+        return deb822_file, source_package, bin_pkgs_table
 
 
 def _check_package_sets(

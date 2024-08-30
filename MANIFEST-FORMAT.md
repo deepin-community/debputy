@@ -1,6 +1,6 @@
 # The debputy manifest format
 
-_This is [reference guide] and is primarily useful if you have an idea of what you are looking for._
+_This is [reference documentation] and is primarily useful if you have an idea of what you are looking for._
 _If you are new to `debputy`, maybe you want to read [GETTING-STARTED-WITH-dh-debputy.md](GETTING-STARTED-WITH-dh-debputy.md) first._
 
 <!-- To writers and reviewers: Check the documentation against https://documentation.divio.com/ -->
@@ -542,6 +542,60 @@ Limitations:
   `{{PACKAGE}}` cannot be used when defining a variable. This restriction may be
    lifted in the future.
 
+# Build environment (`build-environment`)
+
+Define the environment variables used in all build commands.
+
+The environment definition can be used to tweak the environment variables used by the
+build commands. An example:
+
+    environment:
+      set:
+        ENV_VAR: foo
+        ANOTHER_ENV_VAR: bar
+
+The environment definition has multiple attributes for setting environment variables
+which determines when the definition is applied. The resulting environment is the
+result of the following order of operations.
+
+  1. The environment `debputy` received from its parent process.
+  2. Apply all the variable definitions from `set` (if the attribute is present)
+  3. Apply all computed variables (such as variables from `dpkg-buildflags`).
+  4. Apply all the variable definitions from `override` (if the attribute is present)
+  5. Remove all variables listed in `unset` (if the attribute is present).
+
+Accordingly, both `override` and `unset` will overrule any computed variables while
+`set` will be overruled by any computed variables.
+
+Note that these variables are not available via manifest substitution (they are only
+visible to build commands). They are only available to build commands.
+
+The `build-environment` attribute is a mapping and has the following attributes:
+
+ - `set` (optional): Mapping of string
+
+   A mapping of environment variables to be set.
+
+   Note these environment variables are set before computed variables (such
+   as `dpkg-buildflags`) are provided. They can affect the content of the
+   computed variables, but they cannot overrule them. If you need to overrule
+   a computed variable, please use `override` instead.
+
+ - `override` (optional): Mapping of string
+
+   A mapping of environment variables to set.
+
+   Similar to `set`, but it can overrule computed variables like those from
+   `dpkg-buildflags`.
+
+ - `unset` (optional): List of string
+
+   A list of environment variables to unset.
+
+   Any environment variable named here will be unset. No warnings or errors
+   will be raised if a given variable was not set.
+
+
 # Installations
 
 For source packages building a single binary, the `dh_auto_install` from debhelper will default to
@@ -625,7 +679,7 @@ you could do:
     installations:
       - install:
             sources:
-            # By-pass automatic discard of `libfoo.la` - no globs *cannot* be used!
+            # By-pass automatic discard of `libfoo.la` - globs *cannot* be used!
              - "usr/lib/libfoo.la"
              - "usr/lib/libfoo*.so*"
             into: libfoo1
@@ -755,8 +809,8 @@ alternative name.
 
 ## Install examples (`install-examples`)
 
-This install rule resemble that of `dh_installexamples`.  It is a shorthand over the generic `
-install` rule with the following key features:
+This install rule resemble that of `dh_installexamples`.  It is a shorthand over the generic
+`install` rule with the following key features:
 
  1) It pre-defines the `dest-dir` that respects the "main documentation package" recommendation from
     Debian Policy. The `install-examples` will use the `examples` subdir for the package documentation

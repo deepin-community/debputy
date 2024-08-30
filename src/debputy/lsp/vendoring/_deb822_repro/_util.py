@@ -279,7 +279,7 @@ def len_check_iterator(
             Value parser did not fully cover the entire line with tokens (
             missing range {covered}..{content_len}).  Occurred when parsing "{content}"
             """
-            ).format(covered=covered, content_len=content_len, line=content)
+            ).format(covered=covered, content_len=content_len, content=content)
             raise ValueError(msg)
         msg = textwrap.dedent(
             """\

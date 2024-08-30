@@ -31,10 +31,11 @@ from debputy.manifest_conditions import (
 from debputy.manifest_parser.base_types import (
     FileSystemMatchRule,
     FileSystemExactMatchRule,
-    DebputyDispatchableType,
 )
+from debputy.manifest_parser.tagging_types import DebputyDispatchableType
 from debputy.packages import BinaryPackage
 from debputy.path_matcher import MatchRule, ExactFileSystemPath, MATCH_ANYTHING
+from debputy.plugin.plugin_state import run_in_context_of_plugin
 from debputy.substitution import Substitution
 from debputy.util import _error, _warn
 
@@ -546,6 +547,7 @@ def _resolve_matches(
     dest_paths: Union[Sequence[Tuple[str, bool]], Callable[[PathMatch], str]],
     install_context: "InstallRuleContext",
 ) -> Iterator[Tuple[PathMatch, Sequence[Tuple[str, "FSPath"]]]]:
+    dest_and_roots: Sequence[Tuple[str, "FSPath"]]
     if callable(dest_paths):
         compute_dest_path = dest_paths
         for match in matches:
@@ -584,6 +586,7 @@ class InstallRule(DebputyDispatchableType):
         *,
         match_filter: Optional[Callable[["VirtualPath"], bool]] = None,
     ) -> None:
+        super().__init__()
         self._condition = condition
         self._definition_source = definition_source
         self._match_filter = match_filter
@@ -1018,13 +1021,16 @@ class PPFInstallRule(InstallRule):
         "_into",
     )
 
+    # noinspection PyMissingConstructor
     def __init__(
         self,
         into: BinaryPackage,
         substitution: Substitution,
         ppfs: Sequence["PackagerProvidedFile"],
     ) -> None:
-        super().__init__(
+        run_in_context_of_plugin(
+            "debputy",
+            super().__init__,
             None,
             "<built-in; PPF install rule>",
         )
@@ -1141,8 +1147,8 @@ class DiscardRule(InstallRule):
                 if s.search_dir.fs_path in matches
             )
             if len(limit_to) != len(search_dirs):
-                matches.difference(s.search_dir.fs_path for s in search_dirs)
-                paths = ":".join(matches)
+                m = matches.difference(s.search_dir.fs_path for s in search_dirs)
+                paths = ":".join(m)
                 _error(
                     f"The discard rule defined at {self._definition_source} mentions the following"
                     f" search directories that were not known to debputy: {paths}."

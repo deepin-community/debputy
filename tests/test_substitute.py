@@ -1,6 +1,7 @@
 import pytest
 
 from debputy.architecture_support import faked_arch_table
+from debputy.commands.debputy_cmd.output import no_fancy_output
 from debputy.dh_migration.models import (
     DHMigrationSubstitution,
     AcceptableMigrationIssues,
@@ -55,7 +56,7 @@ def test_substitution_match(debputy_plugin_feature_set, value, expected) -> None
 
 
 def test_migrate_substitution() -> None:
-    feature_migration = FeatureMigration("test migration")
+    feature_migration = FeatureMigration("test migration", no_fancy_output())
     subst = DHMigrationSubstitution(
         MOCK_DPKG_ARCH_TABLE,
         AcceptableMigrationIssues(frozenset()),

@@ -2,7 +2,6 @@ import dataclasses
 from typing import (
     Iterator,
     Union,
-    Self,
     Optional,
     List,
     Tuple,
@@ -14,10 +13,19 @@ from typing import (
     TypeVar,
     TYPE_CHECKING,
     Iterable,
+    Container,
+    Literal,
+    FrozenSet,
+    cast,
 )
 
+from debputy.yaml.compat import CommentedBase
+
+from debputy.manifest_parser.exceptions import ManifestParseException
+
 if TYPE_CHECKING:
-    from debputy.manifest_parser.declarative_parser import DebputyParseHint
+    from debputy.manifest_parser.parser_data import ParserContextData
+    from debputy.plugin.api.spec import DebputyIntegrationMode, PackageTypeSelector
 
 
 MP = TypeVar("MP", bound="DebputyParseHint")
@@ -25,26 +33,48 @@ StrOrInt = Union[str, int]
 AttributePathAliasMapping = Mapping[
     StrOrInt, Tuple[StrOrInt, Optional["AttributePathAliasMapping"]]
 ]
+LineReportKind = Literal["key", "value", "container"]
 
 
-class AttributePath(object):
-    __slots__ = ("parent", "name", "alias_mapping", "path_hint")
+_PACKAGE_TYPE_DEB_ONLY = frozenset(["deb"])
+_ALL_PACKAGE_TYPES = frozenset(["deb", "udeb"])
+
+
+def resolve_package_type_selectors(
+    package_type: "PackageTypeSelector",
+) -> FrozenSet[str]:
+    if package_type is _ALL_PACKAGE_TYPES or package_type is _PACKAGE_TYPE_DEB_ONLY:
+        return cast("FrozenSet[str]", package_type)
+    if isinstance(package_type, str):
+        return (
+            _PACKAGE_TYPE_DEB_ONLY
+            if package_type == "deb"
+            else frozenset([package_type])
+        )
+    else:
+        return frozenset(package_type)
+
+
+class AttributePath:
+    __slots__ = ("parent", "container", "name", "alias_mapping", "path_hint")
 
     def __init__(
         self,
         parent: Optional["AttributePath"],
         key: Optional[Union[str, int]],
         *,
+        container: Optional[Any] = None,
         alias_mapping: Optional[AttributePathAliasMapping] = None,
     ) -> None:
         self.parent = parent
+        self.container = container
         self.name = key
         self.path_hint: Optional[str] = None
         self.alias_mapping = alias_mapping
 
     @classmethod
-    def root_path(cls) -> "AttributePath":
-        return AttributePath(None, None)
+    def root_path(cls, container: Optional[Any]) -> "AttributePath":
+        return AttributePath(None, None, container=container)
 
     @classmethod
     def builtin_path(cls) -> "AttributePath":
@@ -67,8 +97,29 @@ class AttributePath(object):
         segments.reverse()
         yield from (s.name for s in segments)
 
-    @property
-    def path(self) -> str:
+    def _resolve_path(self, report_kind: LineReportKind) -> str:
+        parent = self.parent
+        key = self.name
+        if report_kind == "container":
+            key = parent.name if parent else None
+            parent = parent.parent if parent else None
+        container = parent.container if parent is not None else None
+
+        if isinstance(container, CommentedBase):
+            lc = container.lc
+            try:
+                if isinstance(key, str):
+                    if report_kind == "key":
+                        lc_data = lc.key(key)
+                    else:
+                        lc_data = lc.value(key)
+                else:
+                    lc_data = lc.item(key)
+            except (AttributeError, RuntimeError, LookupError, TypeError):
+                lc_data = None
+        else:
+            lc_data = None
+
         segments = list(self._iter_path())
         segments.reverse()
         parts: List[str] = []
@@ -85,11 +136,30 @@ class AttributePath(object):
                 if parts:
                     parts.append(".")
                 parts.append(k)
-        if path_hint:
+
+        if lc_data is not None:
+            line_pos, col = lc_data
+            # Translate 0-based (index) to 1-based (line number)
+            line_pos += 1
+            parts.append(f" [Line {line_pos} column {col}]")
+
+        elif path_hint:
             parts.append(f" <Search for: {path_hint}>")
         if not parts:
             return "document root"
         return "".join(parts)
+
+    @property
+    def path_container_lc(self) -> str:
+        return self._resolve_path("container")
+
+    @property
+    def path_key_lc(self) -> str:
+        return self._resolve_path("key")
+
+    @property
+    def path(self) -> str:
+        return self._resolve_path("value")
 
     def __str__(self) -> str:
         return self.path
@@ -103,9 +173,25 @@ class AttributePath(object):
                 if item == "":
                     # Support `sources[0]` mapping to `source` by `sources -> source` and `0 -> ""`.
                     return AttributePath(
-                        self.parent, self.name, alias_mapping=alias_mapping
+                        self.parent,
+                        self.name,
+                        alias_mapping=alias_mapping,
+                        container=self.container,
                     )
-        return AttributePath(self, item, alias_mapping=alias_mapping)
+        container = self.container
+        if container is not None:
+            try:
+                child_container = self.container[item]
+            except (AttributeError, RuntimeError, LookupError, TypeError):
+                child_container = None
+        else:
+            child_container = None
+        return AttributePath(
+            self,
+            item,
+            alias_mapping=alias_mapping,
+            container=child_container,
+        )
 
     def _iter_path(self) -> Iterator["AttributePath"]:
         current = self
@@ -116,6 +202,27 @@ class AttributePath(object):
                 break
             current = parent
             yield current
+
+
+def check_integration_mode(
+    path: AttributePath,
+    parser_context: Optional["ParserContextData"] = None,
+    expected_debputy_integration_mode: Optional[
+        Container["DebputyIntegrationMode"]
+    ] = None,
+) -> None:
+    if expected_debputy_integration_mode is None:
+        return
+    if parser_context is None:
+        raise AssertionError(
+            f"Cannot use integration mode restriction when parsing {path.path} since it is not parsed in the manifest context"
+        )
+    if parser_context.debputy_integration_mode not in expected_debputy_integration_mode:
+        raise ManifestParseException(
+            f"The attribute {path.path} cannot be used as it is not allowed for"
+            f" the current debputy integration mode ({parser_context.debputy_integration_mode})."
+            f" Please remove the manifest definition or change the integration mode"
+        )
 
 
 @dataclasses.dataclass(slots=True, frozen=True)

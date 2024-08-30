@@ -203,9 +203,9 @@ def test_upstream_changelog_salsa_issue_49(
 ) -> None:
     # https://salsa.debian.org/debian/debputy/-/issues/49
     dctrl = package_single_foo_arch_all_cxt_amd64["foo"]
-    doc_dir = f"./usr/share/doc/{dctrl.name}"
+    doc_dir_path = f"./usr/share/doc/{dctrl.name}"
     data_fs_root = build_virtual_fs(
-        [virtual_path_def(f"{doc_dir}", link_target="foo-data")], read_write_fs=True
+        [virtual_path_def(doc_dir_path, link_target="foo-data")], read_write_fs=True
     )
     source_fs_root = build_virtual_fs(
         [virtual_path_def("changelog", materialized_content="Wrong file!")]

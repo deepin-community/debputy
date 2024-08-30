@@ -79,6 +79,8 @@ def test_alternatives(
     prerm = maintscript_snippets["prerm"].generate_snippet(reverse=True)
     postinst = maintscript_snippets["postinst"].generate_snippet(reverse=True)
 
+    assert prerm is not None
+    assert postinst is not None
     assert "--remove x-terminal-emulator /usr/bin/xterm" in prerm
     assert (
         "--install /usr/bin/x-terminal-emulator x-terminal-emulator /usr/bin/xterm 20"

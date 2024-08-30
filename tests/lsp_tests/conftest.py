@@ -7,20 +7,15 @@ from debputy.packages import DctrlParser
 from debputy.plugin.api.feature_set import PluginProvidedFeatureSet
 from debputy.util import setup_logging
 
+from debputy.lsprotocol.types import (
+    InitializeParams,
+    ClientCapabilities,
+    GeneralClientCapabilities,
+    PositionEncodingKind,
+)
+
 try:
     from pygls.server import LanguageServer
-    from lsprotocol.types import (
-        InitializeParams,
-        ClientCapabilities,
-        GeneralClientCapabilities,
-        PositionEncodingKind,
-        TextDocumentItem,
-        Position,
-        CompletionParams,
-        TextDocumentIdentifier,
-        HoverParams,
-        MarkupContent,
-    )
     from debputy.lsp.debputy_ls import DebputyLanguageServer
 
     HAS_PYGLS = True

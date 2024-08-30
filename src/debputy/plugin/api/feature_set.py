@@ -1,29 +1,24 @@
 import dataclasses
-import textwrap
-from typing import Dict, List, Tuple, Sequence, Any
+from typing import Dict, List, Tuple, Sequence, Any, Optional, Type
 
-from debputy import DEBPUTY_DOC_ROOT_DIR
 from debputy.manifest_parser.declarative_parser import ParserGenerator
-from debputy.plugin.api import reference_documentation
 from debputy.plugin.api.impl_types import (
     DebputyPluginMetadata,
     PackagerProvidedFileClassSpec,
     MetadataOrMaintscriptDetector,
-    TTP,
-    DispatchingTableParser,
-    TP,
-    SUPPORTED_DISPATCHABLE_TABLE_PARSERS,
-    DispatchingObjectParser,
-    SUPPORTED_DISPATCHABLE_OBJECT_PARSERS,
     PluginProvidedManifestVariable,
     PluginProvidedPackageProcessor,
     PluginProvidedDiscardRule,
     ServiceManagerDetails,
     PluginProvidedKnownPackagingFile,
     PluginProvidedTypeMapping,
-    OPARSER_PACKAGES,
-    OPARSER_PACKAGES_ROOT,
+    PluginProvidedBuildSystemAutoDetection,
 )
+from debputy.plugin.api.parser_tables import (
+    SUPPORTED_DISPATCHABLE_OBJECT_PARSERS,
+    SUPPORTED_DISPATCHABLE_TABLE_PARSERS,
+)
+from debputy.plugin.debputy.to_be_api_types import BuildSystemRule
 
 
 def _initialize_parser_generator() -> ParserGenerator:
@@ -70,6 +65,9 @@ class PluginProvidedFeatureSet:
     manifest_parser_generator: ParserGenerator = dataclasses.field(
         default_factory=_initialize_parser_generator
     )
+    auto_detectable_build_systems: Dict[
+        Type[BuildSystemRule], PluginProvidedBuildSystemAutoDetection
+    ] = dataclasses.field(default_factory=dict)
 
     def package_processors_in_order(self) -> Sequence[PluginProvidedPackageProcessor]:
         order = []

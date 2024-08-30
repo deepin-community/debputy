@@ -1,9 +1,8 @@
 import dataclasses
 import os
+import subprocess
 from functools import lru_cache
 from typing import (
-    TypedDict,
-    NotRequired,
     Sequence,
     Optional,
     Union,
@@ -12,12 +11,14 @@ from typing import (
     Mapping,
     Iterable,
     TYPE_CHECKING,
-    Callable,
-    Type,
-    Generic,
+    Dict,
+    MutableMapping,
+    NotRequired,
 )
 
+from debputy.manifest_conditions import ManifestCondition
 from debputy.manifest_parser.exceptions import ManifestParseException
+from debputy.manifest_parser.tagging_types import DebputyParsedContent
 from debputy.manifest_parser.util import (
     AttributePath,
     _SymbolicModeSegment,
@@ -25,24 +26,10 @@ from debputy.manifest_parser.util import (
 )
 from debputy.path_matcher import MatchRule, ExactFileSystemPath
 from debputy.substitution import Substitution
-from debputy.types import S
-from debputy.util import _normalize_path, T
+from debputy.util import _normalize_path, _error, _warn, _debug_log
 
 if TYPE_CHECKING:
-    from debputy.manifest_conditions import ManifestCondition
     from debputy.manifest_parser.parser_data import ParserContextData
-
-
-class DebputyParsedContent(TypedDict):
-    pass
-
-
-class DebputyDispatchableType:
-    __slots__ = ()
-
-
-class DebputyParsedContentStandardConditional(DebputyParsedContent):
-    when: NotRequired["ManifestCondition"]
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -51,11 +38,8 @@ class OwnershipDefinition:
     entity_id: int
 
 
-@dataclasses.dataclass
-class TypeMapping(Generic[S, T]):
-    target_type: Type[T]
-    source_type: Type[S]
-    mapper: Callable[[S, AttributePath, Optional["ParserContextData"]], T]
+class DebputyParsedContentStandardConditional(DebputyParsedContent):
+    when: NotRequired[ManifestCondition]
 
 
 ROOT_DEFINITION = OwnershipDefinition("root", 0)
@@ -438,3 +422,76 @@ class FileSystemExactMatchRule(FileSystemMatchRule):
 
 class FileSystemExactNonDirMatchRule(FileSystemExactMatchRule):
     pass
+
+
+class BuildEnvironmentDefinition:
+
+    def dpkg_buildflags_env(
+        self,
+        env: Mapping[str, str],
+        definition_source: Optional[str],
+    ) -> Dict[str, str]:
+        dpkg_env = {}
+        try:
+            bf_output = subprocess.check_output(["dpkg-buildflags"], env=env)
+        except FileNotFoundError:
+            if definition_source is None:
+                _error(
+                    "The dpkg-buildflags command was not available and is necessary to set the relevant"
+                    "env variables by default."
+                )
+            _error(
+                "The dpkg-buildflags command was not available and is necessary to set the relevant"
+                f"env variables for the environment defined at {definition_source}."
+            )
+        except subprocess.CalledProcessError as e:
+            if definition_source is None:
+                _error(
+                    f"The dpkg-buildflags command failed with exit code {e.returncode}. Please review the output from"
+                    f" dpkg-buildflags above to resolve the issue."
+                )
+            _error(
+                f"The dpkg-buildflags command failed with exit code {e.returncode}. Please review the output from"
+                f" dpkg-buildflags above to resolve the issue. The environment definition that triggered this call"
+                f" was {definition_source}"
+            )
+        else:
+            warned = False
+            for line in bf_output.decode("utf-8").splitlines(keepends=False):
+                if "=" not in line or line.startswith("="):
+                    if not warned:
+                        _warn(
+                            f"Unexpected output from dpkg-buildflags (not a K=V line): {line}"
+                        )
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip() != k:
+                    if not warned:
+                        _warn(
+                            f'Unexpected output from dpkg-buildflags (Key had spaces): "{line}"'
+                        )
+                    continue
+                dpkg_env[k] = v
+
+        return dpkg_env
+
+    def log_computed_env(self, source: str, computed_env: Mapping[str, str]) -> None:
+        _debug_log(f"Computed environment variables from {source}")
+        for k, v in computed_env.items():
+            _debug_log(f"  {k}={v}")
+
+    def update_env(self, env: MutableMapping[str, str]) -> None:
+        dpkg_env = self.dpkg_buildflags_env(env, None)
+        self.log_computed_env("dpkg-buildflags", dpkg_env)
+        env.update(dpkg_env)
+
+
+class BuildEnvironments:
+
+    def __init__(
+        self,
+        environments: Dict[str, BuildEnvironmentDefinition],
+        default_environment: Optional[BuildEnvironmentDefinition],
+    ) -> None:
+        self.environments = environments
+        self.default_environment = default_environment

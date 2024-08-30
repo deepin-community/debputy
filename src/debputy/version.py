@@ -55,6 +55,9 @@ if __version__ in ("N/A",):
             except (subprocess.CalledProcessError, FileNotFoundError):
                 v = "N/A"
 
+        if v.startswith("archive/"):
+            v = v[8:]
+
         if v.startswith("debian/"):
             v = v[7:]
         return v

@@ -82,7 +82,7 @@ def test_interpreter_detection(
 ) -> None:
     interpreter = extract_shebang_interpreter(raw_shebang)
     # The `and ...` part is just to get the raw line in the error message
-    assert interpreter is not None or raw_shebang == b""
+    assert interpreter is not None
 
     assert interpreter.original_command == original_command
     assert interpreter.command_full_basename == command_full_basename
@@ -127,6 +127,7 @@ def empty_manifest(
         dpkg_arch_query,
         no_profiles_or_build_options,
         debputy_plugin_feature_set,
+        "full",
         debian_dir=debian_dir,
     ).build_manifest()
 
@@ -147,11 +148,11 @@ def test_interpreter_rewrite(empty_manifest: HighLevelManifest) -> None:
     foo = fs_root.lookup("usr/bin/foo")
     foo_sh = fs_root.lookup("usr/bin/foo.sh")
 
-    assert foo.is_file
+    assert foo is not None and foo.is_file
     with foo.open() as fd:
         assert fd.read() == "random data"
 
-    assert foo_sh.is_file
+    assert foo_sh is not None and foo_sh.is_file
     with foo_sh.open() as fd:
         expected = textwrap.dedent(
             """\

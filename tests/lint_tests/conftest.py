@@ -7,15 +7,19 @@ from debputy.packages import DctrlParser
 from debputy.util import setup_logging
 
 try:
-    from lsprotocol.types import Diagnostic
     from debputy.lsp.spellchecking import disable_spellchecking
-
-    HAS_LSPROTOCOL = True
 except ImportError:
-    HAS_LSPROTOCOL = False
 
     def disable_spellchecking() -> None:
         pass
+
+
+try:
+    from lsprotocol import types
+except ImportError:
+    HAS_LSPROTOCOL = False
+else:
+    HAS_LSPROTOCOL = True
 
 
 @pytest.fixture(scope="session", autouse=True)

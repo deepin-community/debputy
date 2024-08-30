@@ -8,7 +8,15 @@ from contextlib import ExitStack
 from typing import Optional, Iterator, IO, Any, List, Dict, Callable, Union
 
 from debputy.plugin.api import VirtualPath
-from debputy.util import _error, xargs, escape_shell, _info, assume_not_none
+from debputy.util import (
+    _error,
+    xargs,
+    escape_shell,
+    _info,
+    assume_not_none,
+    print_command,
+    _debug_log,
+)
 
 
 @contextlib.contextmanager
@@ -119,8 +127,27 @@ def process_manpages(fs_root: VirtualPath, _unused1: Any, _unused2: Any) -> None
         for manpage in manpages:
             dest_name = manpage
             if dest_name.endswith(".gz"):
-                dest_name = dest_name[:-3]
-            os.rename(f"{dest_name}.encoded", manpage)
+                encoded_name = dest_name[:-3] + ".encoded"
+                with open(dest_name, "wb") as out:
+                    _debug_log(
+                        f"Recompressing {dest_name} via gzip -9nc {escape_shell(encoded_name)}"
+                    )
+                    try:
+                        subprocess.check_call(
+                            [
+                                "gzip",
+                                "-9nc",
+                                encoded_name,
+                            ],
+                            stdin=subprocess.DEVNULL,
+                            stdout=out,
+                        )
+                    except subprocess.CalledProcessError:
+                        _error(
+                            f"The command {escape_shell('gzip', '-nc', f'{encoded_name}')} > {dest_name} failed!"
+                        )
+            else:
+                os.rename(f"{dest_name}.encoded", manpage)
 
 
 def _filter_compress_paths() -> Callable[[VirtualPath], Iterator[VirtualPath]]:
